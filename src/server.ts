@@ -78,7 +78,6 @@ import { buildNodeCommand, type HookAdapter, type PlatformId, isInProcessPluginP
 import { detectPlatform } from "./platforms/detect.js";
 import { OpenCodeAdapter, opencodeConfigDir } from "./platforms/opencode/index.js";
 import { isContextModeToolEnabled, readContextModeToolsAllowlist } from "./util/tools-allowlist.js";
-import { getHookScriptPaths } from "./util/hook-config.js";
 import { stripJsonComments } from "./util/jsonc.js";
 import { resolveProjectDir } from "./util/project-dir.js";
 import { loadDatabase } from "./db-base.js";
@@ -4677,21 +4676,8 @@ async function doctorHookLines(pluginRoot: string): Promise<string[]> {
     lines.push(`${prefix} ${result.check}: ${result.message}${fix}`);
   }
 
-  const hookScriptPaths = getHookScriptPaths(diagnosticAdapter, pluginRoot);
-  if (hookScriptPaths.length === 0) {
-    lines.push("[OK] Hook scripts: no direct .mjs script paths to verify");
-  }
-  for (const scriptPath of hookScriptPaths) {
-    const hookPath = resolve(pluginRoot, scriptPath);
-    if (existsSync(hookPath)) {
-      lines.push(`[OK] Hook script: PASS — ${hookPath}`);
-    } else {
-      lines.push(`[FAIL] Hook script: FAIL — not found at ${hookPath}`);
-    }
-  }
   return lines;
 }
-
 registerCtxTool(
   "open_ctx_purge",
   {

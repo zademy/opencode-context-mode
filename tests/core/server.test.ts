@@ -4592,17 +4592,6 @@ describe("open_ctx_doctor — renderer-safe output (Z.ai compat)", () => {
   }, 30_000);
 });
 
-describe("open_ctx_doctor hook script checks", () => {
-  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
-
-  test("resolves relative hook script paths against pluginRoot", () => {
-    const doctorSection = serverSrc.slice(serverSrc.indexOf("open_ctx_doctor"), serverSrc.indexOf("open_ctx_purge"));
-    expect(doctorSection).toContain("for (const scriptPath of hookScriptPaths)");
-    expect(doctorSection).toContain("const hookPath = resolve(pluginRoot, scriptPath)");
-    expect(doctorSection).not.toContain("for (const hookPath of hookScriptPaths)");
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════
 // open_ctx_fetch_and_index cache-key collision (Fix 6/10)
@@ -5166,9 +5155,8 @@ describe("prose-style policy (#482)", () => {
     const bundlePaths = [
       "../../server.bundle.mjs",
       "../../cli.bundle.mjs",
-      "../../hooks/session-extract.bundle.mjs",
-      "../../hooks/session-snapshot.bundle.mjs",
-      "../../hooks/session-db.bundle.mjs",
+      "../../hooks/security.bundle.mjs",
+      "../../hooks/platform-identity.bundle.mjs",
     ];
     for (const rel of bundlePaths) {
       const p = resolve(__dirname, rel);

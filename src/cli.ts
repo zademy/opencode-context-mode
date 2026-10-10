@@ -39,7 +39,6 @@ import { resolve, dirname, join, sep, basename, isAbsolute } from "node:path";
 import { tmpdir, devNull, homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { detectRuntimes, getRuntimeSummary, hasBunRuntime, getAvailableLanguages } from "./runtime.js";
-import { getHookScriptPaths } from "./util/hook-config.js";
 import { startDashboardServer } from "./dashboard/server.js";
 import {
   ensureWritableStorageDir,
@@ -956,11 +955,3 @@ function dashboardCommand(argv: string[]): void {
       process.exit(1);
     });
 }
-
-/* -------------------------------------------------------
- * uninstall — undo the host state the plugin deployed
- * ------------------------------------------------------- */
-
-/* -------------------------------------------------------
- * statusline — forward to bin/statusline.mjs
- * ------------------------------------------------------- */

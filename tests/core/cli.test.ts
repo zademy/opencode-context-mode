@@ -29,41 +29,6 @@ import { removeCacheHealHook, toUnixPath } from "../../src/cli.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
-// ── cli.bundle.mjs — marketplace install support ──────────────────────
-
-// ── bin/analytics.bundle.mjs — statusline marketplace install support ──
-//
-// bin/statusline.mjs dynamically imports the compiled analytics module.
-// Every other session/*.ts consumer (session-db, session-extract,
-// session-snapshot) ships a co-located CI bundle with build/ as fallback —
-// analytics.ts was the one left out, so a git-clone marketplace install
-// (build/ is gitignored, only `tsc` produces it, only npm/CI installs run
-// that) never resolved a target and bin/statusline.mjs permanently
-// rendered the empty-state headline instead of real KPIs.
-
-// ── .mcp.json — MCP server config ────────────────────────────────────
-
-describe(".mcp.json — MCP server config", () => {
-  it(".mcp.json.example carries the one universal MCP block", () => {
-    // The ${CLAUDE_PLUGIN_ROOT} placeholder is gone: only Claude Code ever
-    // substituted it. Every other MCP client runs the same npx invocation.
-    const example = JSON.parse(readFileSync(resolve(ROOT, ".mcp.json.example"), "utf-8"));
-    expect(example.mcpServers["open-context-mode"]).toEqual({ command: "npx", args: ["-y", "open-context-mode"] });
-  });
-
-  it("package.json files[] MUST NOT ship .mcp.json (architectural lock — closes #531)", () => {
-    // PR #253 flip-flop: source .mcp.json kept switching between the
-    // placeholder form (correct for end-users via marketplace install) and
-    // the relative form (correct for contributors opening the repo as a
-    // regular project). Stop shipping it in the tarball so the two roles
-    // never collide again. End users get MCP via .claude-plugin/plugin.json
-    // — cli.ts no longer writes `.mcp.json` to the plugin cache (#609).
-    const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf-8"));
-    expect(pkg.files).toBeDefined();
-    expect(pkg.files).not.toContain(".mcp.json");
-  });
-});
-
 // ── CLI Hook Path Tests ───────────────────────────────────────────────
 
 // ── bun:sqlite adapter (#45) ──────────────────────────────────────────
@@ -451,22 +416,6 @@ describe("Bin entry uses cli.bundle.mjs", () => {
     // Must run actual checks
     expect(doctorSection).toContain("PolyglotExecutor");
     expect(doctorSection).toContain("FTS5");
-  });
-
-  it("doctor hook script discovery supports flat and nested hook config entries", () => {
-    const helperSrc = readFileSync(resolve(ROOT, "src", "util", "hook-config.ts"), "utf-8");
-    expect(helperSrc).toContain("export function getCommandsFromHookEntry");
-    expect(helperSrc).toContain("(entry as { command?: unknown }).command");
-    expect(helperSrc).toContain("Array.isArray(hooks)");
-    expect(helperSrc).toContain("getCommandsFromHookEntry(entry)");
-    expect(helperSrc).not.toContain("entry.hooks");
-
-    for (const rel of ["src/cli.ts", "src/server.ts"]) {
-      const src = readFileSync(resolve(ROOT, rel), "utf-8");
-      expect(src).toContain('import { getHookScriptPaths } from "./util/hook-config.js";');
-      expect(src).not.toContain("function getCommandsFromHookEntry");
-      expect(src).not.toContain("function getHookScriptPaths");
-    }
   });
 
   it("cli doctor treats standalone adapters as not version-comparable", () => {

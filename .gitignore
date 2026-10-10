@@ -1,7 +1,5 @@
 node_modules/
 build/
-# hooks/ensure-deps.mjs install backoff marker (runtime state)
-.ensure-deps-*.install-state.json
 packages/*/dist/
 *.tsbuildinfo
 .DS_Store
@@ -11,11 +9,7 @@ tmp.*/
 server.bundle.mjs
 cli.bundle.mjs
 package-lock.json
-hooks/session-extract.bundle.mjs
-hooks/session-snapshot.bundle.mjs
-hooks/session-db.bundle.mjs
 hooks/security.bundle.mjs
-bin/analytics.bundle.mjs
 gh-cli-cache/
 tasks/
 .playwright-mcp/
@@ -23,22 +17,6 @@ tasks/
 open-context-mode-guidance-*/
 .claude/worktrees/
 
-# .mcp.json is local-only — purpose splits between contributor dev
-# (relative paths work because cwd = repo root) and end-user marketplace
-# install (placeholder ${CLAUDE_PLUGIN_ROOT}/start.mjs is required).
-# These two forms have flip-flopped 3 times in history (#253 #531 etc),
-# causing every fresh install to silently break. End users get MCP via
-# .claude-plugin/plugin.json (always placeholder) and /open_ctx-upgrade's
-# cli.ts write (always placeholder). The .mcp.json at repo root only
-# helps contributors during local dev. Untracked → can't regress.
-# Copy .mcp.json.example to .mcp.json for local dev.
-.mcp.json
-# Exception: the GitHub Copilot CLI plugin bundle ships its OWN .mcp.json (a
-# Copilot plugin discovers MCP from a `.mcp.json` in its root — real marketplace
-# plugins do the same). It is the plugin's config, NOT the repo-root dev file the
-# rule above guards, so un-ignore exactly this one path. It pins
-# OPEN_CONTEXT_MODE_PLATFORM=copilot-cli so the server self-identifies as Copilot.
-!configs/copilot-cli/.mcp.json
 .claude-worktrees/
 .vibetree/
 .cw/

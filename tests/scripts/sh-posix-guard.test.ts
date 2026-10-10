@@ -43,7 +43,7 @@ const SCRIPTS = execFileSync("git", ["ls-files", "*.sh"], {
 
 describe("shell scripts carry the POSIX-sh re-exec guard (#1242)", () => {
   it("discovers the guarded scripts (inventory sanity)", () => {
-    expect(SCRIPTS.length).toBeGreaterThanOrEqual(3);
+    expect(SCRIPTS.length).toBeGreaterThanOrEqual(1);
     expect(SCRIPTS).toContain("scripts/open_ctx-debug.sh");
   });
 

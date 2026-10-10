@@ -103,13 +103,9 @@ describe("assert-bundle script", () => {
   // safety net that proves G3 is wired correctly to real bundles.
   it("current production bundles pass the assert-bundle clean check", () => {
     const repoRoot = resolve(__dirname, "../..");
-    const bundles = [
-      "server.bundle.mjs",
-      "cli.bundle.mjs",
-      "hooks/session-extract.bundle.mjs",
-      "hooks/session-snapshot.bundle.mjs",
-      "hooks/session-db.bundle.mjs",
-    ].map((p) => join(repoRoot, p));
+    const bundles = ["server.bundle.mjs", "cli.bundle.mjs", "hooks/security.bundle.mjs", "hooks/platform-identity.bundle.mjs"].map((p) =>
+      join(repoRoot, p),
+    );
 
     const r = runAssert(...bundles);
     if (r.status !== 0) {
