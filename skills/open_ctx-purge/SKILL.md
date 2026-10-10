@@ -1,49 +1,33 @@
 ---
 name: open_ctx-purge
-description: |
-  Purge the open-context-mode knowledge base. Permanently deletes all indexed content
-  and resets session stats. This is destructive and cannot be undone.
+description: Delete open-context-mode data. Irreversible.
   Trigger: /open-context-mode:open_ctx-purge
 user-invocable: true
 ---
 
 # Open Context Mode Purge
 
-Permanently deletes session data for this project. Two scopes are supported (issue #520):
+Permanently deletes open-context-mode data. This cannot be undone, so confirm the scope
+with the user before calling anything.
 
-- **Project scope** (`scope: "project"`): wipes EVERYTHING — knowledge base, all session DB rows for every session, events markdown, and stats.
-- **Session scope** (`sessionId: "<id>"` or `scope: "session"`): wipes ONLY the matching session's rows + FTS5 chunks. Sibling sessions, project stats, and the FTS5 store file are preserved.
+## Scope
+
+- **Project** — `open_ctx_purge(confirm: true, scope: "project")`. Wipes the knowledge
+  base, every session's DB rows, events markdown and stats.
+- **Session** — `open_ctx_purge(confirm: true, scope: "session", sessionId: "<id>")`.
+  Wipes only that session's rows and FTS5 chunks; sibling sessions, project stats and the
+  store file survive.
 
 ## Instructions
 
-1. **Decide the scope first** with the user:
-   - "Wipe just one session?" → ask for the `sessionId`.
-   - "Wipe the whole project?" → confirm scope:'project' (this is the destructive, irreversible default).
-2. **Warn the user about scope:'project'**. Everything will be deleted:
-   - FTS5 knowledge base (all indexed content from `open_ctx_index`, `open_ctx_fetch_and_index`, `open_ctx_batch_execute`)
-   - Session events DB (analytics, metadata, resume snapshots) for ALL sessions in the project
-   - Session events markdown file
-   - In-memory session stats + persisted stats file
-3. Call the `mcp__open-context-mode__open_ctx_purge` MCP tool with the chosen parameters:
-   - Scoped: `{ confirm: true, sessionId: "<id>" }` — implies scope:'session'.
-   - Project: `{ confirm: true, scope: "project" }` — explicit destructive form.
-   - Bare `{ confirm: true }` still works but emits a deprecation warning. Prefer the explicit forms.
-4. Report the result to the user — the response lists exactly what was deleted and (for scoped purges) confirms that other sessions and project stats were preserved.
+1. Ask which scope, unless the user already said. If they want an overview first,
+   `open_ctx_stats` is read-only and safe to run.
+2. Call the MCP tool with `confirm: true` and the agreed scope.
+3. Report what was deleted, and what survived if the scope was narrower than project.
 
-## Schema rules
+## CLI Fallback
 
-- `confirm: true` is always required.
-- `sessionId` and `scope: "project"` together is REJECTED as ambiguous (the sessionId implies session scope; combining with project scope contradicts intent).
-- `scope: "session"` without `sessionId` throws — sessionId is required.
+```bash
+open-context-mode purge --confirm --scope project
+```
 
-## When to Use
-
-- **Scoped (per-session)**: scratch acceptance scenarios, drill replays, isolating a polluted session without losing the main working session's stats.
-- **Project**: KB contains stale or incorrect content polluting search results, switching between unrelated projects in the same session, completely fresh start.
-
-## Important
-
-- `open_ctx_purge` is the **only** way to delete session data. No other mechanism exists.
-- `open_ctx_stats` is read-only — shows statistics only.
-- `/clear` and `/compact` do NOT affect any open-context-mode data.
-- There is no undo. Re-index content if you need it again.

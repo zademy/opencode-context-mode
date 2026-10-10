@@ -1,22 +1,23 @@
 ---
 name: open_ctx-doctor
-description: |
-  Run open-context-mode diagnostics. Checks runtimes, hooks, FTS5,
-  plugin registration, npm and marketplace versions.
+description: Diagnose an open-context-mode install — runtimes, hooks, FTS5, npm version.
   Trigger: /open-context-mode:open_ctx-doctor
 user-invocable: true
 ---
 
 # Open Context Mode Doctor
 
-Run diagnostics and display results directly in the conversation.
-
 ## Instructions
 
-1. Call the `open_ctx_doctor` MCP tool directly. It runs all checks server-side and returns a plain-text status report.
-2. Display the results verbatim — they are already formatted with plain-text status prefixes: `[OK]` PASS, `[FAIL]` FAIL, `[WARN]` WARN. Renderer-safe (no markdown task-list syntax) for cross-client compatibility (e.g., Z.ai GLM).
-3. **Fallback** (only if MCP tool call fails): Derive the **plugin root** from this skill's base directory (go up 2 levels — remove `/skills/open_ctx-doctor`), then run with Bash:
+1. Call the `open_ctx_doctor` MCP tool. It runs every check server-side and returns a
+   plain-text report.
+2. Reproduce it verbatim. The status prefixes are already renderer-safe across clients:
+   `[OK]` PASS, `[FAIL]` FAIL, `[WARN]` WARN.
+3. **Fallback**, only when the MCP tool call fails: resolve the plugin root by dropping
+   `/skills/open_ctx-doctor` from this skill's directory, then run
+   ```bash
+   CLI="<PLUGIN_ROOT>/cli.bundle.mjs"; [ ! -f "$CLI" ] && CLI="<PLUGIN_ROOT>/build/cli.js"
+   node "$CLI" doctor
    ```
-   CLI="<PLUGIN_ROOT>/cli.bundle.mjs"; [ ! -f "$CLI" ] && CLI="<PLUGIN_ROOT>/build/cli.js"; node "$CLI" doctor
-   ```
-   Re-display results verbatim with the same `[OK]`/`[FAIL]`/`[WARN]` prefixes.
+   and reproduce the same output with the same prefixes.
+

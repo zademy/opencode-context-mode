@@ -1,46 +1,48 @@
 ---
 name: open_ctx-index
-description: |
-  Index a local file or directory into open-context-mode's persistent FTS5 knowledge base
-  so future open_ctx_search calls can retrieve focused snippets without rereading raw files.
+description: Store a file or directory for later retrieval by open_ctx_search.
   Trigger: /open-context-mode:open_ctx-index
 user-invocable: true
 ---
 
 # Open Context Mode Index
 
-Index local project content for later search.
+Store local content in the FTS5 knowledge base so `open_ctx_search` can retrieve focused
+snippets later.
 
 ## Instructions
 
 1. Prefer the `open_ctx_index` MCP tool when it is available.
-2. Ask for a path only if the user did not provide one and the current project root is ambiguous.
-3. Use `path`, not large inline `content`, so file bytes do not enter the conversation.
-4. For repository indexing, pass conservative bounds and a clear source label:
+2. Ask for a path only when the user gave none and the project root is ambiguous.
+3. Pass `path`, never a large inline `content`. The bytes stay in the sandbox; the
+   conversation never carries them.
+4. Give the source a descriptive label — that label is what `open_ctx_search` filters on.
+   `project:<dir>` is the CLI default for directories.
 
 ```javascript
 open_ctx_index({
   path: ".",
-  source: "project:<name>",
+  source: "project:my-app",
   maxDepth: 5,
-  maxFiles: 200
+  maxFiles: 200,
+  exclude: ["node_modules", "dist", ".git", "coverage"]
 })
 ```
 
-5. If MCP tools are unavailable, fall back to the CLI:
+5. Fall back to the CLI when MCP tools are unavailable:
 
 ```bash
-open-context-mode index . --source project:<name>
+open-context-mode index . --source project:my-app --exclude node_modules --exclude dist
 ```
 
-6. Report the indexed source label, file count or section count, and the matching search command:
+6. Report the source label, the file/section count, and the matching search call:
 
 ```javascript
-open_ctx_search({ source: "project:<name>", queries: ["..."] })
+open_ctx_search({ source: "project:my-app", queries: ["..."] })
 ```
 
-## Safety
+## Bounds
 
-- Do not index dependency directories, build outputs, secrets, or generated artifacts.
-- Prefer `--exclude` or `exclude` for project-specific noisy paths.
-- For broad repos, ask the user before raising `maxFiles` above 500.
+- Leave `node_modules`, build output, `.git`, secrets and generated artifacts out.
+- For broad repos, confirm with the user before raising `maxFiles` past 500.
+

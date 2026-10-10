@@ -1,26 +1,23 @@
 ---
 name: open_ctx-stats
-description: |
-  Show how much context window open-context-mode saved this session.
-  Displays token consumption, context savings ratio, and per-tool breakdown.
-  Read-only — shows stats only, no reset capability.
-  To wipe the knowledge base entirely, use open_ctx_purge instead.
+description: Show what the sandbox saved this session.
   Trigger: /open-context-mode:open_ctx-stats
 user-invocable: true
 ---
 
 # Open Context Mode Stats
 
-Show context savings for the current session.
+Report the current session's context savings.
 
 ## Instructions
 
-1. Call the `mcp__open-context-mode__open_ctx_stats` MCP tool (no parameters needed).
-2. **CRITICAL**: You MUST copy-paste the ENTIRE tool output as markdown text directly into your response message. Do NOT summarize, do NOT collapse, do NOT paraphrase. The user must see the full tables without pressing ctrl+o. Copy every line exactly as returned by the tool.
-3. After the full output, add ONE sentence highlighting the key savings metric, e.g.:
-   - "open-context-mode saved **12.4x** — 92% of data stayed in sandbox."
-   - If no data yet: "No open-context-mode calls yet this session."
+1. Call the `open_ctx_stats` MCP tool (no parameters).
+2. Reproduce the tool output in full, every table and line, in your response — the user
+   reads it without expanding anything. Summarizing or collapsing it defeats the command.
+3. Close with one sentence naming the headline number, e.g.
+   "Saved **12.4x** — 92% of the data stayed in the sandbox." When nothing has run yet:
+   "No open-context-mode calls this session."
 
-## Purge
+`open_ctx_stats` is read-only. To delete indexed content, use
+`open_ctx_purge(confirm: true)` via `/open-context-mode:open_ctx-purge`.
 
-- **`open_ctx_purge(confirm: true)`** — Permanently deletes all indexed content from the knowledge base. Use `/open-context-mode:open_ctx-purge` for this.
