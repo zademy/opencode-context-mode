@@ -281,7 +281,7 @@ describe("#3 — exact queries resolve in one call, absent ones say so", () => {
   test("the whole-input-plus-retrieval strategy costs more returned bytes", async () => {
     const whole = await call(echoOff, "open_ctx_execute", {
       language: "shell",
-      code: `cat ${ISSUES}`,
+      code: `cat ${shq(ISSUES)}`,
     });
     const wholeBytes = bytes(whole.text);
     const focused = await call(echoOff, "open_ctx_execute_file", jsonRecord(EXISTING_RECORD));
