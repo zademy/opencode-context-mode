@@ -39,7 +39,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_COMMAND_ECHO_MAX, runBatchCommands, type BatchCommand } from "../../src/server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const mcpEntry = resolve(__dirname, "..", "..", "start.mjs");
+const mcpEntry = resolve(__dirname, "..", "..", "server.bundle.mjs");
 
 interface MockResult {
   stdout: string;

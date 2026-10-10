@@ -693,27 +693,6 @@ describe("routePreToolUse", () => {
       expect(result!.reason).toContain("open_ctx_fetch_and_index");
     });
 
-    it("Claude Code pretooluse treats subagent hook payloads as open_ctx_* unavailable (#794)", async () => {
-      const main = await spawnPreToolUseHook({
-        tool_name: "WebFetch",
-        tool_input: { url: "https://example.com" },
-        session_id: "core-routing-main-webfetch",
-      });
-      expect(main.status).toBe(0);
-      expect(main.parsed?.hookSpecificOutput?.permissionDecision).toBe("deny");
-      expect(main.parsed?.hookSpecificOutput?.permissionDecisionReason).toContain("open_ctx_fetch_and_index");
-
-      const subagent = await spawnPreToolUseHook({
-        tool_name: "WebFetch",
-        tool_input: { url: "https://example.com" },
-        session_id: "core-routing-subagent-webfetch",
-        agent_id: "agent-794",
-        agent_type: "claude-code-guide",
-      });
-      expect(subagent.status).toBe(0);
-      expect(subagent.stdout).toBe("");
-    });
-
     it("treats opencode webfetch as WebFetch and blocks it (#1052)", () => {
       const url = "https://example.com";
       const result = routePreToolUse("webfetch", { url }, undefined, "opencode", "opencode-webfetch");
@@ -1686,16 +1665,6 @@ describe("buildSecurityWarningContext — agent-facing security warning (#558)",
     // Must point users at the actionable fix.
     expect(r.parsed.warning).toMatch(/npm run bundle|security\.bundle\.mjs|reinstall/i);
   });
-
-  it("hooks/sessionstart.mjs wires initSecurity + buildSecurityWarningContext into the SessionStart additionalContext", () => {
-    // Static-source check — the wiring must be present in the
-    // top-level Claude Code SessionStart hook so users see the
-    // warning in-band on first session of a broken install.
-    const src = readFileSync(resolve(SLICE4_DIRNAME, "..", "..", "hooks", "sessionstart.mjs"), "utf-8");
-    expect(src).toContain("initSecurity");
-    expect(src).toContain("buildSecurityWarningContext");
-    expect(src).toContain("isSecurityInitFailed");
-  });
 });
 
 // #1037 — a redirect must never be the reason a caller cannot reach the
@@ -2103,30 +2072,6 @@ async function spawnRoutingProbe(
 ): Promise<{ status: number | null; stdout: string; parsed: any }> {
   const { spawnSync } = await import("node:child_process");
   const r = spawnSync("node", ["--input-type=module", "-e", code], {
-    encoding: "utf-8",
-    timeout: 15_000,
-    env: { ...process.env, ...env },
-  });
-  const stdout = (r.stdout ?? "").trim();
-  let parsed: any = null;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    /* surface raw */
-  }
-  return { status: r.status, stdout, parsed };
-}
-
-async function spawnPreToolUseHook(
-  input: Record<string, unknown>,
-  env: Record<string, string> = {},
-  scriptPath = "hooks/pretooluse.mjs",
-): Promise<{ status: number | null; stdout: string; parsed: any }> {
-  const { spawnSync } = await import("node:child_process");
-  const repoRoot = resolve(SLICE4_DIRNAME, "..", "..");
-  const r = spawnSync(process.execPath, [scriptPath], {
-    cwd: repoRoot,
-    input: JSON.stringify(input),
     encoding: "utf-8",
     timeout: 15_000,
     env: { ...process.env, ...env },

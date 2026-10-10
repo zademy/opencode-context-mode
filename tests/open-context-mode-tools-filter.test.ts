@@ -59,7 +59,7 @@ describe("isContextModeToolEnabled", () => {
 // start.mjs resolves server.bundle.mjs, so this exercises the guard in
 // src/server.ts as shipped — not a mirror.
 describe("OPEN_CONTEXT_MODE_TOOLS wiring — the real server honors the allowlist", () => {
-  const mcpEntry = resolve(__dirname, "..", "start.mjs");
+  const mcpEntry = resolve(__dirname, "..", "server.bundle.mjs");
 
   function start(extraEnv: Record<string, string>): ChildProcess {
     return spawn(process.execPath, [mcpEntry], {

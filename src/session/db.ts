@@ -1723,20 +1723,4 @@ export class SessionDB {
 
     return oldSessions.length;
   }
-
-  /**
-   * Delete event rows whose session_id has no matching session_meta row.
-   *
-   * Orphaned events accumulate when meta rows were aged out by an older
-   * version of `cleanupOldSessions` but the matching events were left
-   * behind (or when callers wrote events without a meta upsert). The Kimi
-   * Code sessionstart hook calls this on every startup as a self-healing
-   * step; surfacing it as a SessionDB method keeps the SQL definition in
-   * one place instead of letting hook scripts reach through to
-   * `db.db.exec(...)` and re-encode schema knowledge in mjs files.
-   */
-  pruneOrphanedEvents(): number {
-    const result = this.db.prepare(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`).run();
-    return Number(result.changes ?? 0);
-  }
 }

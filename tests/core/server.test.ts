@@ -1357,9 +1357,8 @@ describe("open_ctx_index: projectRoot path resolution (#365)", () => {
   test("no *_PROJECT_DIR env set → relative path falls back to spawned-server cwd", async () => {
     // Strip every project-dir env the resolver chain consults (see
     // server.ts getProjectDir) so resolution is forced down to process.cwd().
-    // start.mjs would re-set OPEN_CONTEXT_MODE_PROJECT_DIR and CLAUDE_PROJECT_DIR
-    // from originalCwd — that originalCwd is the `cwd` we hand to spawn(),
-    // which is exactly what we want to assert on.
+    // PWD is stripped too: the resolver prefers it over cwd, and it points
+    // at the test runner's repo — not the spawn cwd we assert on.
     const fallbackCwd = mkdtempSync(join(tmpdir(), "open_ctx-index-cwdfallback-"));
     const fallbackFile = "t.md";
     const fallbackMarker = `open_ctx-index-cwdfallback-marker-${process.pid}-${Date.now()}`;
@@ -1369,7 +1368,7 @@ describe("open_ctx_index: projectRoot path resolution (#365)", () => {
     for (const [k, v] of Object.entries(process.env)) {
       if (typeof v !== "string") continue;
       if (/_PROJECT_DIR$/.test(k)) continue;
-      if (k === "VSCODE_CWD") continue;
+      if (k === "VSCODE_CWD" || k === "PWD") continue;
       strippedEnv[k] = v;
     }
     strippedEnv.OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK = "1";
@@ -4396,7 +4395,7 @@ describe("buildFetchCode — IPv6 zone-id + generic dns.resolve", () => {
 // open_ctx_doctor resource cleanup regression (#247)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const mcpEntry = resolve(__dirname, "..", "..", "start.mjs");
+const mcpEntry = resolve(__dirname, "..", "..", "server.bundle.mjs");
 
 interface DoctorJsonRpcResponse {
   jsonrpc: "2.0";

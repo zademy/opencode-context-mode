@@ -23,7 +23,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const repoRoot = resolve(__dirname, "..", "..");
-const mcpEntry = resolve(repoRoot, "start.mjs");
+const mcpEntry = resolve(repoRoot, "server.bundle.mjs");
 
 // Absolute paths baked into the journey code so no test depends on the
 // sandbox's working directory.

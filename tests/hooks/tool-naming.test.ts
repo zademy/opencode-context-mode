@@ -461,30 +461,3 @@ describe("routePreToolUse with platform parameter", () => {
     });
   });
 });
-
-// ─── SLICE Qwen-1: sessionstart platform-aware tool namer ───
-describe("sessionstart detectPlatformFromEnv", () => {
-  let detectPlatformFromEnv: (env?: Record<string, string | undefined>) => string;
-
-  beforeAll(async () => {
-    const mod = await import("../../hooks/core/platform-detect.mjs");
-    detectPlatformFromEnv = mod.detectPlatformFromEnv;
-  });
-
-  // QWEN_SESSION_ID retracted in v1.0.107 — 0 hits in qwen-code source
-  // (verified Phase 7 against refs/platforms/qwen-code/). Only QWEN_PROJECT_DIR
-  // is set by the Qwen hook runner — see src/platforms/detect.ts:69 comment
-  // and refs/platforms/qwen-code/packages/core/src/hooks/hookRunner.ts SET site.
-  it("does NOT promote bare QWEN_SESSION_ID (fabrication retraction)", () => {
-    expect(detectPlatformFromEnv({ QWEN_SESSION_ID: "qwen-1" })).toBe("claude-code");
-  });
-
-  it("falls back to claude-code when no env var is set", () => {
-    expect(detectPlatformFromEnv({})).toBe("claude-code");
-  });
-
-  it("Qwen-prefix MCP names are produced when platform=qwen-code", () => {
-    const namer = createToolNamer("qwen-code");
-    expect(namer("open_ctx_execute")).toBe("mcp__open-context-mode__open_ctx_execute");
-  });
-});

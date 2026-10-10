@@ -55,19 +55,3 @@ describe("the committed bundle carries the same data as the source table", () =>
     expect(bundle.PLATFORM_TOOL_ALIASES).toEqual({ ...PLATFORM_TOOL_ALIASES });
   });
 });
-
-describe("hooks/core/platform-detect.mjs mirror derives from the table (drift closure)", () => {
-  it("mirror lists exactly each platform's env-var names, in registry order", async () => {
-    const { PLATFORM_ENV_VARS_MIRROR } = await import("../../hooks/core/platform-detect.mjs");
-    const mirror = PLATFORM_ENV_VARS_MIRROR as unknown as Mirror[];
-    const expected = PLATFORM_ENV_VAR_TABLE.map(([id, entries]) => [id, entries.map((e) => e.name)]);
-    expect(mirror).toEqual(expected);
-  });
-
-  it("mirror names OpenCode's detection vars", async () => {
-    const { PLATFORM_ENV_VARS_MIRROR } = await import("../../hooks/core/platform-detect.mjs");
-    const mirror = new Map(PLATFORM_ENV_VARS_MIRROR as unknown as Mirror[]);
-    expect(mirror.get("opencode")).toContain("OPENCODE_CLIENT");
-    expect(mirror.get("opencode")).toContain("OPENCODE_PROJECT_DIR");
-  });
-});

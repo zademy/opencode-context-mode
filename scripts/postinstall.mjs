@@ -2,13 +2,12 @@
 /**
  * postinstall — cross-platform post-install tasks
  *
- * 1. OpenClaw detection (print helper message)
- * 2. Windows global install: fix broken bin→node_modules path
+ * 1. Windows global install: fix broken bin→node_modules path
  *    when nvm4w places the shim and node_modules in different directories.
  *    Creates a directory junction so npm's %~dp0\node_modules\... resolves.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, lstatSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { dirname, resolve, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,44 +100,6 @@ function isGlobalInstall() {
  */
 function isSafeWindowsPath(p) {
   return !/[&|<>"^%\r\n]/.test(p);
-}
-
-// ── 0. Self-heal Layer 3: Backward symlink for stale registry (anthropics/claude-code#46915) ──
-// When this install completes, installed_plugins.json may still point to an old
-// non-existent path. Create a symlink from that old path → our new directory.
-try {
-  const ipPath = resolve(homedir(), ".claude", "plugins", "installed_plugins.json");
-  if (existsSync(ipPath)) {
-    const ip = JSON.parse(readFileSync(ipPath, "utf-8"));
-    const cacheRoot = resolve(homedir(), ".claude", "plugins", "cache");
-    for (const [key, entries] of Object.entries(ip.plugins || {})) {
-      if (!key.startsWith("open-context-mode@")) continue;
-      for (const entry of entries) {
-        const rp = entry.installPath;
-        if (!rp || existsSync(rp)) continue;
-        // Path traversal guard
-        if (!resolve(rp).startsWith(cacheRoot + sep)) continue;
-        // Remove dangling symlink
-        try {
-          if (lstatSync(rp).isSymbolicLink()) unlinkSync(rp);
-        } catch {}
-        const rpParent = dirname(rp);
-        if (!existsSync(rpParent)) mkdirSync(rpParent, { recursive: true });
-        try {
-          symlinkSync(pkgRoot, rp, process.platform === "win32" ? "junction" : undefined);
-        } catch {
-          /* may fail if path is locked or permissions */
-        }
-      }
-    }
-  }
-} catch {
-  /* best effort — don't block install */
-}
-
-// ── 1. OpenClaw detection ────────────────────────────────────────────
-if (process.env.OPENCLAW_STATE_DIR) {
-  console.log("\n  OpenClaw detected. Run: npm run install:openclaw\n");
 }
 
 // ── 2. Windows global install — nvm4w junction fix ───────────────────
@@ -235,61 +196,9 @@ if (process.platform === "win32" && process.env.npm_config_global === "true") {
 // the binding can also go missing on macOS/Linux when prebuilds are stale
 // or the install was interrupted.
 //
-// Logic lives in scripts/heal-better-sqlite3.mjs (shared with
-// hooks/ensure-deps.mjs so there's one source of truth).
+// Logic lives in scripts/heal-better-sqlite3.mjs.
 try {
   healBetterSqlite3Binding(pkgRoot);
 } catch {
   /* best effort — don't block install */
-}
-
-// ── 4. Hook normalization at install time (#414) ─────────────────────
-// hooks/hooks.json + .claude-plugin/plugin.json ship with `${CLAUDE_PLUGIN_ROOT}`
-// + bare `node` command. On Windows + Claude Code that combination triggers
-// `cjs/loader:1479 MODULE_NOT_FOUND` (placeholder mangling, MSYS path issues,
-// PATH lookup failure). start.mjs normalizes on every MCP boot, but normalizing
-// here too closes the gap for the very first hook fire after a fresh install
-// (before any MCP server has run).
-//
-// Guard 1: only run on REAL `npm install -g open-context-mode`. A contributor's
-// `npm install` from a git clone (or CI checkout) must NOT mutate the
-// source-tracked `.claude-plugin/plugin.json` — doing so substitutes the
-// literal `${CLAUDE_PLUGIN_ROOT}` with an absolute path and trips
-// `scripts/assert-asymmetric-drift.mjs` (Issue #531) in the build chain.
-// Reuses `isGlobalInstall()` (section -1 already gates that way); the
-// `.git` walk inside it is what keeps contributor / CI installs untouched.
-//
-// Guard 2: /open_ctx-upgrade clones the repo to `<tmpdir>/open-context-mode-upgrade-<epoch>/`
-// and runs `npm install` there before `cpSync`-ing files into the real pluginRoot
-// (src/cli.ts). The tmpdir has no `.git`, so `isGlobalInstall()` returns
-// true there — we need this second check to skip the staging dir. Without
-// it, pkgRoot is the tmpdir → hooks.json gets the tmpdir's absolute paths
-// baked in → cpSync copies that poisoned hooks.json into the real plugin
-// dir → tmpdir is later cleaned → every hook fires with MODULE_NOT_FOUND.
-// start.mjs normalizes correctly on the next MCP boot from the real
-// pluginRoot anyway.
-const TMPDIR_UPGRADE_RE = /[/\\]open-context-mode-upgrade-\d+[/\\]?$/;
-if (isGlobalInstall() && !TMPDIR_UPGRADE_RE.test(pkgRoot)) {
-  try {
-    // #738: probe for Bun ≥1.0 so the post-install hooks.json rewrite picks
-    // the faster runtime where available. Probe failures (e.g. build not
-    // present yet during `npm install` itself) fall through to nodePath.
-    let jsRuntimePath;
-    try {
-      const { resolveHookRuntime } = await import("../build/runtime.js");
-      const r = resolveHookRuntime();
-      if (r.isBun) jsRuntimePath = r.path;
-    } catch {
-      /* best effort — fall through */
-    }
-    const { normalizeHooksOnStartup } = await import("../hooks/normalize-hooks.mjs");
-    normalizeHooksOnStartup({
-      pluginRoot: pkgRoot,
-      nodePath: process.execPath,
-      jsRuntimePath,
-      platform: process.platform,
-    });
-  } catch {
-    /* best effort — never block install */
-  }
 }

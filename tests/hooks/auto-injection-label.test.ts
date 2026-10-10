@@ -60,7 +60,7 @@ describe("buildAutoInjection labels the block honestly", () => {
 describe("every call site declares which kind of injection it is", () => {
   // Pi reaches the helper through the cached `buildAuto` alias, so its
   // contract is covered by the dedicated Pi test below rather than this regex.
-  const CALLERS = ["hooks/sessionstart.mjs", "src/platforms/opencode/plugin.ts"];
+  const CALLERS = ["src/platforms/opencode/plugin.ts"];
 
   it.each(CALLERS)("%s passes an explicit source", (rel) => {
     const src = readFileSync(join(root, rel), "utf8");
