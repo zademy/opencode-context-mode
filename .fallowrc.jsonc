@@ -1,0 +1,37 @@
+// fallow runs zero-config out of the box, but it cannot see the runtime roots
+// this repo loads by *path* rather than by import: agent hook JSONs, plugin
+// manifests, the CLI bin, postinstall scripts. Without `entry`, every hook
+// script reads as an unused file (73 false positives -> 1).
+{
+  "ignoreExportsUsedInFile": true,
+  // Loaded by agent/platform configs and manifests, not by an import graph.
+  "entry": [
+    "hooks/**/*.mjs",
+    "bin/**/*.mjs",
+    "scripts/**/*.ts",
+    "scripts/**/*.mjs",
+    "configs/**/*.ts",
+    ".openclaw-plugin/**/*.ts",
+    ".pi/**/*.ts",
+    "web/**/*.mjs",
+    "web/**/*.js",
+    "src/dashboard/**/*.ts",
+    "src/dashboard/**/*.css",
+    "tests/live-benchmark*.ts",
+    "tests/mcp-integration.ts",
+  ],
+  // Sample code for the parser tests: fake imports that are meant not to resolve.
+  "ignorePatterns": ["tests/fixtures/**"],
+  // start.mjs installs these in the background on codex/marketplace installs and
+  // src/server.ts loads them via require.resolve(), so there is no static import
+  // for fallow to trace. tests/scripts/start-mjs-*.test.ts pins that behaviour.
+  "ignoreDependencies": [
+    "turndown",
+    "turndown-plugin-gfm",
+    "@mixmark-io/domino",
+    // Imported from CSS (@import "tailwindcss") by the dashboard build only.
+    "tailwindcss",
+    // Spawned by path (node_modules/.bin/tailwindcss) in scripts/build-dashboard-css.mjs.
+    "@tailwindcss/cli",
+  ],
+}

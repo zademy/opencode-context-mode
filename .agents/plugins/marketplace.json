@@ -1,0 +1,20 @@
+{
+  "name": "open-context-mode",
+  "interface": {
+    "displayName": "Open Context Mode"
+  },
+  "plugins": [
+    {
+      "name": "open-context-mode",
+      "source": {
+        "source": "url",
+        "url": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

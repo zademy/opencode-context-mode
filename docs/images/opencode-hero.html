@@ -1,0 +1,447 @@
+<!doctype html>
+<!--
+  README hero — 1280x720 @1.25x (1600x900), OpenCode-first.
+  Render (from this directory):
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+      --disable-gpu --hide-scrollbars --force-device-scale-factor=1.25 \
+      --window-size=1280,720 --virtual-time-budget=4000 \
+      --screenshot=opencode-hero.png opencode-hero.html
+  Edit the HTML, re-render, commit both.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>open-context-mode × OpenCode</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1280px;
+        height: 720px;
+        overflow: hidden;
+      }
+
+      .frame {
+        position: relative;
+        width: 1280px;
+        height: 720px;
+        padding: 48px 64px 40px;
+        display: flex;
+        flex-direction: column;
+        background:
+          radial-gradient(900px 620px at 74% 8%, rgba(76, 130, 255, 0.2) 0%, transparent 62%),
+          radial-gradient(700px 520px at 8% 96%, rgba(52, 211, 153, 0.09) 0%, transparent 60%),
+          #0a0b0e;
+        color: #e9ecf1;
+        font-family: 'IBM Plex Sans', system-ui, sans-serif;
+        overflow: hidden;
+      }
+      /* grid + vignette, same trick as the OG banners */
+      .frame::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+        background-size: 40px 40px;
+        pointer-events: none;
+        -webkit-mask-image: radial-gradient(ellipse at 60% 40%, #000 20%, transparent 78%);
+        mask-image: radial-gradient(ellipse at 60% 40%, #000 20%, transparent 78%);
+      }
+      .frame::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        box-shadow: inset 0 0 220px rgba(0, 0, 0, 0.75);
+      }
+      .layer {
+        position: relative;
+        z-index: 2;
+      }
+
+      .mono {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+      }
+      .pixel {
+        font-family: 'Silkscreen', 'IBM Plex Mono', monospace;
+      }
+
+      /* ── top bar ─────────────────────────────────────────── */
+      .top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: linear-gradient(150deg, #5b8cff, #2f5fe0);
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 10px 26px rgba(47, 95, 224, 0.45);
+        padding: 7px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 2.5px;
+      }
+      .mark i {
+        background: rgba(255, 255, 255, 0.35);
+        border-radius: 1.5px;
+      }
+      .mark i:first-child {
+        background: #fff;
+      }
+      .brand-name {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .brand-name span {
+        color: #5b8cff;
+      }
+      .divider {
+        width: 1px;
+        height: 20px;
+        background: rgba(255, 255, 255, 0.16);
+      }
+      .tag {
+        font-size: 17px;
+        color: #8b96a6;
+        text-transform: uppercase;
+      }
+      .tag b {
+        color: #34d399;
+        font-weight: 500;
+      }
+
+      /* ── middle: claim + terminal ────────────────────────── */
+      .mid {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 56px;
+        padding: 26px 0 28px;
+      }
+
+      .claim {
+        width: 528px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 26px 18px;
+        border-radius: 14px;
+        background: linear-gradient(160deg, #5b8cff 0%, #2f5fe0 100%);
+        box-shadow: 0 18px 44px rgba(47, 95, 224, 0.4);
+      }
+      .chip .n {
+        font-size: 82px;
+        font-weight: 700;
+        line-height: 0.86;
+        letter-spacing: -0.05em;
+        color: #fff;
+      }
+      .chip .l {
+        font-size: 17px;
+        line-height: 1.15;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.82);
+        padding-top: 4px;
+      }
+      .savings {
+        margin-top: 26px;
+        font-size: 92px;
+        font-weight: 700;
+        line-height: 0.9;
+        letter-spacing: -0.045em;
+        color: #fff;
+      }
+      .wordmark {
+        margin-top: 20px;
+        font-size: 54px;
+        line-height: 1;
+        color: #fff;
+        text-shadow: 0 0 26px rgba(91, 140, 255, 0.55);
+      }
+      .proof {
+        margin-top: 22px;
+        font-size: 19px;
+        line-height: 1.5;
+        color: #98a3b3;
+      }
+      .proof b {
+        color: #34d399;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      /* raw output vs what the session actually keeps */
+      .cmp {
+        margin-top: 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 13px;
+        font-size: 14px;
+      }
+      .cmp .row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .cmp .k {
+        width: 74px;
+        flex: none;
+        color: #7d8797;
+      }
+      .cmp .t {
+        height: 14px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.11);
+      }
+      .cmp .t.raw {
+        flex: 1;
+      }
+      .cmp .t.kept {
+        width: 12px;
+        flex: none;
+        background: #34d399;
+        box-shadow: 0 0 12px rgba(52, 211, 153, 0.55);
+      }
+      .cmp .v {
+        flex: none;
+        color: #98a3b3;
+        white-space: nowrap;
+      }
+      .cmp .row.kept .k,
+      .cmp .row.kept .v {
+        color: #34d399;
+      }
+
+      /* ── terminal card ───────────────────────────────────── */
+      .term {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        border-radius: 16px;
+        background: linear-gradient(180deg, #12151b 0%, #0d0f14 100%);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 34px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(91, 140, 255, 0.07);
+        overflow: hidden;
+      }
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.16);
+      }
+      .bar .path {
+        margin-left: 6px;
+        font-size: 14px;
+        color: #8b96a6;
+      }
+      .bar .path b {
+        color: #34d399;
+        font-weight: 500;
+      }
+      .screen {
+        flex: 1;
+        padding: 24px 26px 22px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 16.5px;
+        line-height: 1.62;
+      }
+      .ask {
+        color: #e9ecf1;
+      }
+      .ask i {
+        color: #5b8cff;
+        font-style: normal;
+        margin-right: 10px;
+      }
+      .tool {
+        margin-top: 14px;
+        color: #cbd3de;
+      }
+      .tool b {
+        color: #5b8cff;
+        font-weight: 500;
+      }
+      .tool .res {
+        display: block;
+        color: #7d8797;
+        padding-left: 22px;
+      }
+      .tool .ok {
+        color: #34d399;
+      }
+      .answer {
+        margin-top: 16px;
+        padding: 12px 16px;
+        border-radius: 8px;
+        background: rgba(52, 211, 153, 0.09);
+        border-left: 3px solid #34d399;
+        color: #d7f5e7;
+        font-size: 16px;
+      }
+      .meter {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px dashed rgba(255, 255, 255, 0.12);
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-size: 14px;
+        color: #7d8797;
+      }
+      .bar2 {
+        flex: 1;
+        height: 12px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.07);
+        overflow: hidden;
+        display: flex;
+        gap: 3px;
+      }
+      .bar2 i {
+        width: 5px;
+        background: rgba(255, 255, 255, 0.1);
+      }
+      .bar2 i.on {
+        background: #34d399;
+        box-shadow: 0 0 10px rgba(52, 211, 153, 0.5);
+      }
+      .meter b {
+        color: #e9ecf1;
+        font-weight: 500;
+      }
+
+      /* ── bottom strip ────────────────────────────────────── */
+      .foot {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding-top: 24px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 15px;
+        color: #7d8797;
+        text-transform: uppercase;
+      }
+      .foot .sep {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.22);
+      }
+      .foot .grow {
+        margin-left: auto;
+        color: #5b8cff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="frame">
+      <div class="layer top">
+        <div class="brand">
+          <div class="mark"><i></i><i></i><i></i><i></i></div>
+          <div class="brand-name">context<span>-</span>mode</div>
+          <div class="divider"></div>
+          <div class="tag mono">for <b>opencode</b></div>
+        </div>
+        <div class="tag mono">plugin + mcp · zero config</div>
+      </div>
+
+      <div class="layer mid">
+        <div class="claim">
+          <div>
+            <div class="chip">
+              <span class="n">99%</span>
+              <span class="l mono">context<br />saved</span>
+            </div>
+            <div class="savings">SAVINGS</div>
+            <div class="wordmark pixel">OPENCODE</div>
+            <div class="proof">
+              Raw tool output never enters the session. <b>315 KB → 5.4 KB</b> — the model keeps
+              the answer, not the haystack.
+            </div>
+          </div>
+          <div class="cmp mono">
+            <div class="row">
+              <span class="k">raw</span><span class="t raw"></span
+              ><span class="v">315 KB</span>
+            </div>
+            <div class="row kept">
+              <span class="k">in ctx</span><span class="t kept"></span
+              ><span class="v">5.4 KB</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="term">
+          <div class="bar">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="path mono">opencode · <b>~/open-context-mode</b></span>
+          </div>
+          <div class="screen">
+            <div class="ask"><i>❯</i>how many exported functions live in src/?</div>
+            <div class="tool">
+              ▸ <b>open_ctx_batch_execute</b>
+              <span class="res">indexed 1,204 files → 4 summaries · <span class="ok">0.6 KB</span></span>
+            </div>
+            <div class="tool">
+              ▸ <b>open_ctx_execute</b> javascript
+              <span class="res">counted exports per file · <span class="ok">3.6 KB</span></span>
+            </div>
+            <div class="answer">312 exports across 86 files — computed, not read.</div>
+            <div class="meter mono">
+              <span>context</span>
+              <span class="bar2">
+                <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i
+                ><i></i><i></i><i></i>
+              </span>
+              <span><b>9%</b> used</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="layer foot mono">
+        <span>session continuity</span><span class="sep"></span>
+        <span>think in code</span><span class="sep"></span>
+        <span>17 clients</span><span class="sep"></span>
+        <span>98% less context</span>
+        <span class="grow">github.com/zademy/opencode-context-mode</span>
+      </div>
+    </div>
+  </body>
+</html>

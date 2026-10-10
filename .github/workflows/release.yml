@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Solo si Tests terminó bien, en un push a main (no en PRs)
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # Historial completo: la lista de commits necesita los tags y el log entre ellos
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Obtener versión
+        id: ver
+        run: echo "version=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Crear release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "El release $VERSION ya existe, no hago nada"
+            exit 0
+          fi
+          gh release create "$VERSION" --target "$SHA" --generate-notes --latest
+          # --generate-notes solo lista PRs; este repo empuja directo a main,
+          # así que la lista de commits se genera con git log entre tags.
+          PREV=$(git describe --tags --abbrev=0 "$SHA"^ 2>/dev/null || true)
+          [ -z "$PREV" ] && { echo "Sin tag previo, dejo las notas nativas"; exit 0; }
+          NOTES=$(gh release view "$VERSION" --json body -q .body)
+          {
+            echo "## Commits desde $PREV"
+            echo
+            git log --no-merges --format='- %s (%h)' "${PREV}..${SHA}"
+            echo
+            echo "$NOTES"
+          } > release-notes.md
+          gh release edit "$VERSION" --notes-file release-notes.md

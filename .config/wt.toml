@@ -1,0 +1,7 @@
+# Project config for worktrunk (wt). Checked in so every lane worktree is
+# self-sufficient: the repo needs its own node_modules + built bundles before
+# any test run, and a fresh worktree has neither.
+#
+# Dependencies come from the shared pnpm store (hardlinks), so this is fast and
+# re-downloads nothing.
+post-start = "pnpm install --frozen-lockfile"

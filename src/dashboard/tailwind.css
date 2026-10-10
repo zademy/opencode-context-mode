@@ -1,0 +1,58 @@
+/* Tailwind source for the dashboard page. Compiled by
+ * `npm run tailwind` (scripts/build-dashboard-css.mjs) into
+ * src/dashboard/styles.ts, which ui.ts inlines into the served HTML.
+ * Fonts mirror web/index.html: the product's own type system. */
+@import "tailwindcss";
+
+@source "./ui.ts";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* OpenCode default theme ("opencode"), both variants. Dark values double as
+ * :root defaults; the light block is selected by [data-theme="light"] on the
+ * html element, toggled from the header button and persisted in localStorage. */
+:root,
+html[data-theme="dark"] {
+  --oc-bg: #0a0a0a;
+  --oc-panel: #141414;
+  --oc-element: #1e1e1e;
+  --oc-border: #3c3c3c;
+  --oc-border-strong: #606060;
+  --oc-text: #eeeeee;
+  --oc-muted: #808080;
+  --oc-primary: #fab283;
+  --oc-success: #7fd88f;
+  --oc-warning: #f5a742;
+  --oc-error: #e06c75;
+  --oc-secondary: #5c9cf5;
+  --oc-accent: #9d7cd8;
+  --oc-error-soft: #e06c7570;
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  --oc-bg: #ffffff;
+  --oc-panel: #fafafa;
+  --oc-element: #f5f5f5;
+  --oc-border: #d4d4d4;
+  --oc-border-strong: #a0a0a0;
+  --oc-text: #1a1a1a;
+  --oc-muted: #8a8a8a;
+  --oc-primary: #3b7dd8;
+  --oc-success: #3d9a57;
+  --oc-warning: #d68c27;
+  --oc-error: #d1383d;
+  --oc-secondary: #7b5bb6;
+  --oc-accent: #d68c27;
+  --oc-error-soft: #d1383d70;
+  color-scheme: light;
+}
+
+::selection {
+  background: var(--oc-primary);
+  color: var(--oc-bg);
+}

@@ -1,0 +1,7609 @@
+/**
+ * Consolidated server-related tests.
+ *
+ * Merged from:
+ *   - tests/soft-fail.test.ts
+ *   - tests/stream-cap.test.ts
+ *   - tests/turndown.test.ts
+ *   - tests/project-dir.test.ts
+ *   - tests/subagent-budget.test.ts
+ *
+ * Run: npx vitest run tests/core/server.test.ts
+ */
+
+import { strict as assert } from "node:assert";
+import { spawn, spawnSync, execSync, execFileSync, type ChildProcess } from "node:child_process";
+import { chmodSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, unlinkSync, realpathSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+
+import { PLATFORM_ENV_VARS } from "../../src/platforms/detect.js";
+import { classifyNonZeroExit } from "../../src/exit-classify.js";
+import { PolyglotExecutor } from "../../src/executor.js";
+import { detectRuntimes } from "../../src/runtime.js";
+import { ContentStore } from "../../src/store.js";
+import {
+  clearStorageDirectoryCheckCacheForTests,
+  describeStorageDirectorySource,
+  ensureWritableStorageDir,
+  formatStorageDirectoryError,
+  resolveContentStorageDir,
+  resolveDefaultSessionDir,
+  resolveSessionStorageDir,
+  resolveStatsStorageDir,
+  StorageDirectoryError,
+} from "../../src/session/db.js";
+import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
+import {
+  sanitizeSchemaForStrictClients,
+  resolveExecTimeout,
+  AGY_DEFAULT_EXEC_TIMEOUT_MS,
+  PI_DEFAULT_EXEC_TIMEOUT_MS,
+  HOST_DEFAULT_EXEC_TIMEOUT_MS,
+  REGISTERED_CTX_TOOLS,
+} from "../../src/server.js";
+import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
+import { redirectReason, redirectToReason, denyPatternReason, failClosedReason } from "../../src/security.js";
+
+// ─── Shared setup ───────────────────────────────────────────────────────────
+const runtimes = detectRuntimes();
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const STORAGE_ENV_KEY = "OPEN_CONTEXT_MODE_DIR";
+const savedStorageEnv = process.env[STORAGE_ENV_KEY];
+
+afterEach(() => {
+  if (savedStorageEnv === undefined) delete process.env[STORAGE_ENV_KEY];
+  else process.env[STORAGE_ENV_KEY] = savedStorageEnv;
+  clearStorageDirectoryCheckCacheForTests();
+});
+
+describe("storage path resolution", () => {
+  test("uses adapter defaults when no storage override is set", () => {
+    delete process.env[STORAGE_ENV_KEY];
+
+    const defaultSessionsDir = join(tmpdir(), "open-context-mode-default", "sessions");
+    const defaultRoot = dirname(defaultSessionsDir);
+    const session = resolveSessionStorageDir(() => defaultSessionsDir);
+    const content = resolveContentStorageDir(() => defaultSessionsDir);
+    const stats = resolveStatsStorageDir(() => defaultSessionsDir);
+
+    expect(session).toEqual({
+      kind: "session",
+      path: defaultSessionsDir,
+      envVar: null,
+      source: "default",
+    });
+    expect(content).toEqual({
+      kind: "content",
+      path: join(defaultRoot, "content"),
+      envVar: null,
+      source: "default",
+    });
+    expect(stats).toEqual({
+      kind: "stats",
+      path: defaultSessionsDir,
+      envVar: null,
+      source: "default",
+    });
+  });
+
+  test("shared default session dir helper derives open-context-mode sessions root", () => {
+    const configRoot = join(tmpdir(), "open-context-mode-config-root");
+
+    expect(resolveDefaultSessionDir({ configDir: configRoot })).toBe(join(configRoot, "open-context-mode", "sessions"));
+  });
+
+  test("shared default session dir helper honors config env override", () => {
+    const configRoot = join(tmpdir(), "open-context-mode-env-config-root");
+
+    expect(
+      resolveDefaultSessionDir({
+        configDir: ".ignored",
+        configDirEnv: "OPEN_CONTEXT_MODE_TEST_CONFIG_DIR",
+        env: { OPEN_CONTEXT_MODE_TEST_CONFIG_DIR: configRoot },
+      }),
+    ).toBe(join(configRoot, "open-context-mode", "sessions"));
+  });
+
+  test("legacy session dir wins only inside blank or unset storage override default callback", () => {
+    const legacyDir = join(tmpdir(), "open-context-mode-legacy-sessions");
+    const root = resolve(tmpdir(), "open-context-mode-storage-root");
+    const defaultDir = () =>
+      resolveDefaultSessionDir({
+        configDir: ".ignored",
+        legacySessionDirEnv: "OPEN_CONTEXT_MODE_TEST_SESSION_DIR",
+        env: { OPEN_CONTEXT_MODE_TEST_SESSION_DIR: legacyDir },
+      });
+
+    delete process.env[STORAGE_ENV_KEY];
+    expect(resolveSessionStorageDir(defaultDir).path).toBe(legacyDir);
+
+    process.env[STORAGE_ENV_KEY] = " \t ";
+    expect(resolveSessionStorageDir(defaultDir).path).toBe(legacyDir);
+
+    process.env[STORAGE_ENV_KEY] = root;
+    expect(resolveSessionStorageDir(defaultDir).path).toBe(join(root, "sessions"));
+  });
+
+  test("uses OPEN_CONTEXT_MODE_DIR as the single root for sessions, content, and stats", () => {
+    const root = resolve(tmpdir(), "open-context-mode-storage-root");
+    process.env[STORAGE_ENV_KEY] = root;
+
+    expect(resolveSessionStorageDir(() => "/ignored")).toEqual({
+      kind: "session",
+      path: join(root, "sessions"),
+      envVar: STORAGE_ENV_KEY,
+      source: "override",
+    });
+    expect(resolveContentStorageDir(() => "/ignored")).toEqual({
+      kind: "content",
+      path: join(root, "content"),
+      envVar: STORAGE_ENV_KEY,
+      source: "override",
+    });
+    expect(resolveStatsStorageDir(() => "/ignored")).toEqual({
+      kind: "stats",
+      path: join(root, "sessions"),
+      envVar: STORAGE_ENV_KEY,
+      source: "override",
+    });
+  });
+
+  test("treats blank OPEN_CONTEXT_MODE_DIR as default and reports ignored metadata", () => {
+    process.env[STORAGE_ENV_KEY] = " \t ";
+    const defaultSessionsDir = join(tmpdir(), "open-context-mode-default", "sessions");
+
+    const session = resolveSessionStorageDir(() => defaultSessionsDir);
+    const content = resolveContentStorageDir(() => defaultSessionsDir);
+
+    expect(session).toMatchObject({
+      kind: "session",
+      path: defaultSessionsDir,
+      envVar: null,
+      source: "default",
+      ignoredEnvVar: STORAGE_ENV_KEY,
+      ignoredReason: "empty",
+    });
+    expect(content).toMatchObject({
+      kind: "content",
+      path: join(dirname(defaultSessionsDir), "content"),
+      ignoredEnvVar: STORAGE_ENV_KEY,
+      ignoredReason: "empty",
+    });
+    expect(describeStorageDirectorySource(session)).toBe("default; ignored empty OPEN_CONTEXT_MODE_DIR");
+
+    const err = new StorageDirectoryError("session", session.path, STORAGE_ENV_KEY, undefined, undefined, session);
+    expect(formatStorageDirectoryError(err)).toContain("Ignored empty OPEN_CONTEXT_MODE_DIR; using adapter default.");
+  });
+
+  test("rejects a relative OPEN_CONTEXT_MODE_DIR", () => {
+    process.env[STORAGE_ENV_KEY] = "relative/path";
+
+    expect(() => resolveSessionStorageDir(() => "/ignored")).toThrow(StorageDirectoryError);
+    expect(() => resolveSessionStorageDir(() => "/ignored")).toThrow("OPEN_CONTEXT_MODE_DIR must be an absolute path.");
+  });
+
+  test("memoizes successful writable directory checks", () => {
+    const dir = {
+      kind: "session" as const,
+      path: mkdtempSync(join(tmpdir(), "open_ctx-storage-cache-")),
+      envVar: null,
+      source: "default" as const,
+    };
+
+    expect(ensureWritableStorageDir(dir)).toBe(dir.path);
+    rmSync(dir.path, { recursive: true, force: true });
+    expect(ensureWritableStorageDir(dir)).toBe(dir.path);
+    expect(existsSync(dir.path)).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. Non-zero Exit Code Classification (soft-fail)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Non-zero Exit Code Classification", () => {
+  // ── Soft-fail: shell + exit 1 + stdout present ──
+
+  test("shell exit 1 with stdout → not an error (grep no-match pattern)", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "file1.ts:10: writeRouting\nfile2.ts:20: writeRouting",
+      stderr: "",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("file1.ts:10: writeRouting\nfile2.ts:20: writeRouting");
+  });
+
+  test("shell exit 1 with partial stdout and stderr → real error", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "partial result\n",
+      stderr: "operation failed\n",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Exit code: 1");
+    expect(result.output).toContain("partial result");
+    expect(result.output).toContain("operation failed");
+  });
+
+  test("shell exit 1 with empty stdout → real error", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "",
+      stderr: "",
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  test("shell exit 1 with whitespace-only stdout → real error", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "   \n  ",
+      stderr: "",
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  // ── Hard errors: exit code >= 2 ──
+
+  test("shell exit 2 (grep bad regex) → always error", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 2,
+      stdout: "",
+      stderr: "grep: Invalid regular expression",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Exit code: 2");
+    expect(result.output).toContain("grep: Invalid regular expression");
+  });
+
+  test("shell exit 127 (command not found) → always error", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 127,
+      stdout: "",
+      stderr: "bash: nonexistent: command not found",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Exit code: 127");
+  });
+
+  // ── Non-shell languages: always error ──
+
+  test("javascript exit 1 with stdout → still an error (not shell)", () => {
+    const result = classifyNonZeroExit({
+      language: "javascript",
+      exitCode: 1,
+      stdout: "some output before crash",
+      stderr: "TypeError: x is not a function",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Exit code: 1");
+  });
+
+  test("python exit 1 with stdout → still an error (not shell)", () => {
+    const result = classifyNonZeroExit({
+      language: "python",
+      exitCode: 1,
+      stdout: "partial output",
+      stderr: "Traceback (most recent call last):",
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  test("typescript exit 1 with stdout → still an error (not shell)", () => {
+    const result = classifyNonZeroExit({
+      language: "typescript",
+      exitCode: 1,
+      stdout: "output",
+      stderr: "",
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  // ── Output format ──
+
+  test("soft-fail output is clean stdout (no 'Exit code:' prefix)", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "matched line",
+      stderr: "",
+    });
+    expect(result.output).not.toContain("Exit code:");
+    expect(result.output).toBe("matched line");
+  });
+
+  test("hard error output includes exit code, stdout, and stderr", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 2,
+      stdout: "partial",
+      stderr: "error msg",
+    });
+    expect(result.output).toContain("Exit code: 2");
+    expect(result.output).toContain("partial");
+    expect(result.output).toContain("error msg");
+  });
+
+  test("hard-fail with empty stdout still forwards stderr in output", () => {
+    const result = classifyNonZeroExit({
+      language: "shell",
+      exitCode: 1,
+      stdout: "",
+      stderr: "command not found",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Exit code: 1");
+    expect(result.output).toContain("command not found");
+  });
+
+  test("hard-fail output has labeled 'stdout:' and 'stderr:' sections", () => {
+    const result = classifyNonZeroExit({
+      language: "node",
+      exitCode: 137,
+      stdout: "S",
+      stderr: "E",
+    });
+    expect(result.output).toMatch(/stdout:\s*\nS/);
+    expect(result.output).toMatch(/stderr:\s*\nE/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. Stream Cap (stream-cap)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Stdout Cap", () => {
+  test("stdout: process killed when output exceeds hard cap", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 1024, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 4000; i++) console.log("x".repeat(25));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Expected cap message in stderr, got: " + r.stderr.slice(-200));
+    assert.ok(r.stderr.includes("process killed"), "Expected 'process killed' in stderr");
+  });
+});
+
+describe("Stderr Cap", () => {
+  test("stderr: process killed when stderr exceeds hard cap", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 1024, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 4000; i++) console.error("e".repeat(25));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Expected cap message in stderr for stderr-heavy output");
+  });
+});
+
+describe("Combined Cap", () => {
+  test("combined: cap triggers on total stdout+stderr bytes", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 2048, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 200; i++) process.stdout.write("o".repeat(10) + "\\n");\nfor (let i = 0; i < 200; i++) process.stderr.write("e".repeat(10) + "\\n");',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Combined output should have triggered the cap");
+  });
+});
+
+describe("Normal Operation", () => {
+  test("normal: small output below cap works correctly", async () => {
+    const executor = new PolyglotExecutor({
+      hardCapBytes: 1024 * 1024,
+      runtimes,
+    });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'console.log("hello from capped executor");',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes("hello from capped executor"));
+    assert.ok(!r.stderr.includes("output capped"), "Should NOT contain cap message for small output");
+  });
+
+  test("normal: moderate output below cap preserves all content", async () => {
+    const executor = new PolyglotExecutor({
+      hardCapBytes: 1024 * 1024,
+      runtimes,
+    });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 50; i++) console.log("line-" + i);',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes("line-0"), "Should contain first line");
+    assert.ok(r.stdout.includes("line-49"), "Should contain last line");
+    assert.ok(!r.stderr.includes("output capped"));
+  });
+});
+
+describe("Memory Bounding", () => {
+  test("memory: collected stdout bytes stay bounded near cap", async () => {
+    const capBytes = 4096;
+    const executor = new PolyglotExecutor({ hardCapBytes: capBytes, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 20000; i++) console.log("x".repeat(25));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Cap should have triggered");
+    const stdoutBytes = Buffer.byteLength(r.stdout);
+    const tolerance = 256 * 1024;
+    assert.ok(stdoutBytes < capBytes + tolerance, "Collected " + stdoutBytes + " bytes stdout; expected bounded near " + capBytes);
+  });
+});
+
+describe("Cap Message Format", () => {
+  test("format: cap message reports correct MB value for 2MB cap", async () => {
+    const twoMB = 2 * 1024 * 1024;
+    const executor = new PolyglotExecutor({ hardCapBytes: twoMB, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 100000; i++) process.stdout.write("x".repeat(49) + "\\n");',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("2MB"), "Expected '2MB' in cap message: " + r.stderr.slice(-200));
+    assert.ok(r.stderr.includes("process killed"));
+  });
+
+  test("format: cap message uses em dash and bracket format", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 1024, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 4000; i++) console.log("x".repeat(25));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("\u2014"), "Cap message should use em dash");
+    assert.ok(r.stderr.includes("[output capped at"), "Cap message should start with '[output capped at'");
+  });
+});
+
+describe("Timeout Independence", () => {
+  test("timeout: still fires when output is slow and under cap", async () => {
+    const executor = new PolyglotExecutor({
+      hardCapBytes: 100 * 1024 * 1024,
+      runtimes,
+    });
+    const r = await executor.execute({
+      language: "javascript",
+      code: "while(true) {}",
+      timeout: 500,
+    });
+    assert.equal(r.timedOut, true);
+    assert.ok(!r.stderr.includes("output capped"), "Should be timeout, not cap");
+  });
+
+  test("timeout: cap fires before timeout for fast-producing process", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 1024, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 100000; i++) console.log("x".repeat(50));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Cap should fire before timeout");
+    assert.equal(r.timedOut, false, "timedOut should be false when cap killed the process");
+  });
+});
+
+describe("Default Cap", () => {
+  test("default: executor works with default hardCapBytes (no option)", async () => {
+    const executor = new PolyglotExecutor({ runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'console.log("default cap works");',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes("default cap works"));
+  });
+});
+
+describe("hardCap still limits output", () => {
+  test("hardCap kills process but stdout is NOT truncated", async () => {
+    const executor = new PolyglotExecutor({
+      hardCapBytes: 50 * 1024,
+      runtimes,
+    });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 4000; i++) console.log("x".repeat(25));',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Hard cap should trigger");
+    assert.ok(!r.stdout.includes("truncated"), "stdout should NOT have truncation marker");
+    assert.ok(!r.stdout.includes("showing first"), "stdout should NOT have head/tail marker");
+  });
+});
+
+describe("Large Output Auto-Indexing", () => {
+  test("large stdout is fully preserved by executor", async () => {
+    const executor = new PolyglotExecutor({ runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 100; i++) console.log(`line ${i}: ${"x".repeat(20)}`);',
+    });
+    assert.ok(r.stdout.includes("line 0"), "Should contain first line");
+    assert.ok(r.stdout.includes("line 50"), "Should contain middle line");
+    assert.ok(r.stdout.includes("line 99"), "Should contain last line");
+    assert.ok(!r.stdout.includes("truncated"), "Should NOT be truncated");
+  });
+
+  test("large stdout is indexed into FTS5 and searchable", async () => {
+    const store = new ContentStore(":memory:");
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) lines.push(`line ${i}: data_value_${i}`);
+    const largeOutput = lines.join("\n");
+
+    const indexed = store.indexPlainText(largeOutput, "test:large-output");
+    assert.ok(indexed.totalChunks > 1, "Should be chunked into multiple sections");
+
+    const results = store.searchWithFallback("data_value_2500", 3, "test:large-output");
+    assert.ok(results.length > 0, "Middle content should be searchable");
+    assert.ok(results[0].content.includes("2500"), "Should find the middle line");
+
+    store.close();
+  });
+
+  test("small stdout is returned inline as-is", async () => {
+    const executor = new PolyglotExecutor({ runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'console.log("hello world");',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes("hello world"));
+    assert.ok(!r.stdout.includes("Indexed"), "Small output should NOT be indexed pointer");
+  });
+
+  // Regression for the mid-size gap: without "intent", output between
+  // INTENT_SEARCH_THRESHOLD (5KB) and LARGE_OUTPUT_THRESHOLD (100KB) used to
+  // return raw stdout WITHOUT indexing it, so a later open_ctx_search could never
+  // find it. Fix: index as a side effect while still returning raw inline.
+  test("mid-size no-intent open_ctx_execute output: returned raw inline AND open_ctx_search-able", async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "open_ctx-exec-midsize-"));
+    const marker = "midsize-marker-${process.pid}-${Date.now()}";
+    const proc = startMcpServer({ OPEN_CONTEXT_MODE_PROJECT_DIR: projectDir });
+
+    // Local waiter that does NOT kill the process on resolve — unlike
+    // collectRpcResponses (designed for a single final batch), this test
+    // needs two sequential round trips on the same live process.
+    function awaitOne(id: number, timeoutMs = 15_000): Promise<DoctorJsonRpcResponse | undefined> {
+      return new Promise((res) => {
+        let buffer = "";
+        const onData = (d: Buffer) => {
+          buffer += d.toString();
+          let idx: number;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+              if (parsed.id === id) {
+                proc.stdout!.off("data", onData);
+                clearTimeout(timer);
+                res(parsed);
+                return;
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        };
+        const timer = setTimeout(() => {
+          proc.stdout!.off("data", onData);
+          res(undefined);
+        }, timeoutMs);
+        proc.stdout!.on("data", onData);
+      });
+    }
+
+    try {
+      sendRpc(proc, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "open_ctx-exec-midsize", version: "1.0" } },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+      sendRpc(proc, {
+        jsonrpc: "2.0",
+        id: 200,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_execute",
+          arguments: {
+            language: "javascript",
+            // ~6KB stdout, no "intent" — must land in the 5KB-100KB gap.
+            code: `console.log(${JSON.stringify(marker)} + " " + "x".repeat(6000));`,
+          },
+        },
+      });
+      const execResp = await awaitOne(200);
+
+      expect(execResp?.result?.isError ?? false).toBe(false);
+      const execText = execResp?.result?.content?.[0]?.text ?? "";
+      assert.ok(execText.includes(marker), "Raw stdout (with marker) should be returned inline");
+      assert.ok(execText.includes("x".repeat(6000)), "Full stdout should be returned inline, not truncated");
+      assert.ok(!execText.includes("Indexed"), "Mid-size output must stay inline, not switch to pointer mode");
+
+      sendRpc(proc, {
+        jsonrpc: "2.0",
+        id: 201,
+        method: "tools/call",
+        params: { name: "open_ctx_search", arguments: { queries: [marker], sort: "timeline" } },
+      });
+      const searchResp = await awaitOne(201);
+
+      expect(searchResp?.result?.isError ?? false).toBe(false);
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      assert.ok(searchText.includes(marker), "Mid-size output must have been indexed and be open_ctx_search-able");
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("Cross-Language Cap", () => {
+  test("shell: cap works with shell scripts", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 2048, runtimes });
+    const r = await executor.execute({
+      language: "shell",
+      code: 'yes "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" | head -c 100000',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Cap should trigger for shell output");
+  });
+
+  test.runIf(runtimes.python)("python: cap works with python scripts", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 2048, runtimes });
+    // Single large write (not a 10k-iter loop): keeps the test fast on slow
+    // Windows CI VMs where per-syscall Python overhead can otherwise blow the timeout.
+    const r = await executor.execute({
+      language: "python",
+      code: 'import sys\nsys.stdout.write("x" * 100000)',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Cap should trigger for python output");
+  });
+});
+
+describe("Interleaved Output", () => {
+  test("interleaved: rapid alternating stdout/stderr triggers cap", async () => {
+    const executor = new PolyglotExecutor({ hardCapBytes: 4096, runtimes });
+    const r = await executor.execute({
+      language: "javascript",
+      code: 'for (let i = 0; i < 5000; i++) { if (i % 2 === 0) process.stdout.write("out" + i + "\\n"); else process.stderr.write("err" + i + "\\n"); }',
+      timeout: 10_000,
+    });
+    assert.ok(r.stderr.includes("output capped"), "Interleaved output should trigger cap");
+  });
+});
+
+describe("executeFile Cap", () => {
+  test("executeFile: cap applies to file execution too", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "cap-test-"));
+    const testFile = join(tmpDir, "data.txt");
+    writeFileSync(testFile, "test content", "utf-8");
+
+    try {
+      const executor = new PolyglotExecutor({ hardCapBytes: 1024, runtimes });
+      const r = await executor.executeFile({
+        path: testFile,
+        language: "javascript",
+        code: 'for (let i = 0; i < 4000; i++) console.log("x".repeat(25));',
+        timeout: 10_000,
+      });
+      assert.ok(r.stderr.includes("output capped"), "executeFile should also respect the hard cap");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. Turndown HTML-to-markdown conversion
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Resolve turndown path the same way server.ts will
+const require = createRequire(import.meta.url);
+const turndownPath = require.resolve("turndown");
+const gfmPath = require.resolve("turndown-plugin-gfm");
+
+const turndownExecutor = new PolyglotExecutor();
+
+function buildConversionCode(html: string): string {
+  return `
+const TurndownService = require(${JSON.stringify(turndownPath)});
+const { gfm } = require(${JSON.stringify(gfmPath)});
+const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+td.use(gfm);
+td.addRule("emptyTable", {
+  filter: (node) => node.nodeName === "TABLE" && node.rows.length === 0,
+  replacement: (content) => content,
+});
+td.remove(['script', 'style', 'nav', 'header', 'footer', 'noscript']);
+console.log(td.turndown(${JSON.stringify(html)}));
+`;
+}
+
+describe("turndown HTML-to-markdown conversion tests", () => {
+  test("converts headings", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode("<h1>Title</h1><h2>Subtitle</h2><h3>Section</h3>"),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("# Title"), `expected '# Title', got: ${result.stdout}`);
+    assert(result.stdout.includes("## Subtitle"));
+    assert(result.stdout.includes("### Section"));
+  });
+
+  test("converts links", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode('<p>Visit <a href="https://example.com">Example</a></p>'),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("[Example](https://example.com)"));
+  });
+
+  test("converts fenced code blocks", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode('<pre><code class="language-js">const x = 1;</code></pre>'),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("```"), `expected fenced code block, got: ${result.stdout}`);
+    assert(result.stdout.includes("const x = 1;"));
+  });
+
+  test("strips script tags", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode("<p>Hello</p><script>alert('xss')</script><p>World</p>"),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(!result.stdout.includes("alert"), `script content leaked: ${result.stdout}`);
+    assert(result.stdout.includes("Hello"));
+    assert(result.stdout.includes("World"));
+  });
+
+  test("strips style, nav, header, footer, noscript tags", async () => {
+    const html = [
+      "<style>body { color: red; }</style>",
+      "<header><nav>Menu</nav></header>",
+      "<main><p>Content</p></main>",
+      "<footer>Footer</footer>",
+      "<noscript>Enable JS</noscript>",
+    ].join("");
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode(html),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("Content"), `lost main content: ${result.stdout}`);
+    assert(!result.stdout.includes("Menu"), `nav leaked: ${result.stdout}`);
+    assert(!result.stdout.includes("Footer"), `footer leaked: ${result.stdout}`);
+    assert(!result.stdout.includes("Enable JS"), `noscript leaked: ${result.stdout}`);
+    assert(!result.stdout.includes("color: red"), `style leaked: ${result.stdout}`);
+  });
+
+  test("skips empty tables", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode("<p>Before</p><table></table><p>After</p>"),
+    });
+    assert.equal(result.exitCode, 0, "stderr: " + result.stderr);
+    assert(result.stdout.includes("Before"), "lost preceding content: " + result.stdout);
+    assert(result.stdout.includes("After"), "lost following content: " + result.stdout);
+  });
+
+  test("preserves content from tables without rows", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode("<table><caption>Summary</caption></table>"),
+    });
+    assert.equal(result.exitCode, 0, "stderr: " + result.stderr);
+    assert(result.stdout.includes("Summary"), "lost table content: " + result.stdout);
+  });
+
+  test("converts tables", async () => {
+    const html = `
+    <table>
+      <thead><tr><th>Name</th><th>Age</th></tr></thead>
+      <tbody><tr><td>Alice</td><td>30</td></tr></tbody>
+    </table>`;
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode(html),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("| Name"), `expected pipe table, got: ${result.stdout}`);
+    assert(result.stdout.includes("| Alice"));
+    assert(result.stdout.includes("| ---"), `expected table separator, got: ${result.stdout}`);
+  });
+
+  test("handles nested tags correctly", async () => {
+    const html = "<div><p>Outer <strong>bold <em>and italic</em></strong> text</p></div>";
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode(html),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("**bold"), `missing bold: ${result.stdout}`);
+    assert(result.stdout.includes("italic"), `missing italic: ${result.stdout}`);
+  });
+
+  test("handles malformed HTML gracefully", async () => {
+    const html = "<p>Unclosed paragraph<p>Another<div>Nested badly</p></div>";
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode(html),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes("Unclosed paragraph"), `lost content: ${result.stdout}`);
+    assert(result.stdout.includes("Nested badly"), `lost nested content: ${result.stdout}`);
+  });
+
+  test("decodes HTML entities", async () => {
+    const result = await turndownExecutor.execute({
+      language: "javascript",
+      code: buildConversionCode("<p>Tom &amp; Jerry &lt;3 &quot;cheese&quot;</p>"),
+    });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert(result.stdout.includes('Tom & Jerry <3 "cheese"'), `entities not decoded: ${result.stdout}`);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. Project Directory Path Resolution (project-dir)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Set up two isolated directories to simulate the scenario:
+// - pluginDir: where the plugin is installed (start.sh does cd here)
+// - projectDir: where the user's project lives (the real cwd)
+const projDirBaseDir = join(tmpdir(), "open_ctx-mode-projdir-test-" + Date.now());
+const projectDir = join(projDirBaseDir, "user-project");
+const pluginDir = join(projDirBaseDir, "plugin-install");
+mkdirSync(projectDir, { recursive: true });
+mkdirSync(pluginDir, { recursive: true });
+
+// Create a test file in the user's project directory
+const testFileName = "data.json";
+const testData = { message: "hello from project dir", count: 42 };
+writeFileSync(join(projectDir, testFileName), JSON.stringify(testData), "utf-8");
+
+// Also create a different file with the same name in the plugin directory
+// to prove we're reading from the right place
+const pluginData = { message: "wrong directory", count: 0 };
+writeFileSync(join(pluginDir, testFileName), JSON.stringify(pluginData), "utf-8");
+
+afterAll(() => {
+  rmSync(projDirBaseDir, { recursive: true, force: true });
+});
+
+describe("executeFile: projectRoot path resolution", () => {
+  test("relative path resolves against projectRoot, not cwd", async () => {
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: projectDir,
+    });
+
+    const r = await executor.executeFile({
+      path: testFileName, // relative path — should resolve to projectDir/data.json
+      language: "javascript",
+      code: `
+        const data = JSON.parse(FILE_CONTENT);
+        console.log(data.message);
+      `,
+    });
+
+    assert.equal(r.exitCode, 0, `Expected exit 0, got ${r.exitCode}: ${r.stderr}`);
+    assert.ok(r.stdout.includes("hello from project dir"), `Should read from projectDir, got: ${r.stdout.trim()}`);
+  });
+
+  test("relative path with subdirectory resolves against projectRoot", async () => {
+    const subDir = join(projectDir, "nested", "deep");
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(join(subDir, "nested.txt"), "nested content here", "utf-8");
+
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: projectDir,
+    });
+
+    const r = await executor.executeFile({
+      path: "nested/deep/nested.txt",
+      language: "javascript",
+      code: `console.log(FILE_CONTENT.trim());`,
+    });
+
+    assert.equal(r.exitCode, 0, `Expected exit 0: ${r.stderr}`);
+    assert.ok(r.stdout.includes("nested content here"));
+  });
+
+  test("absolute path ignores projectRoot", async () => {
+    const absFile = join(projDirBaseDir, "absolute-test.txt");
+    writeFileSync(absFile, "absolute path content", "utf-8");
+
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: projectDir,
+    });
+
+    const r = await executor.executeFile({
+      path: absFile, // absolute path — projectRoot should be ignored
+      language: "javascript",
+      code: `console.log(FILE_CONTENT.trim());`,
+    });
+
+    assert.equal(r.exitCode, 0, `Expected exit 0: ${r.stderr}`);
+    assert.ok(r.stdout.includes("absolute path content"));
+  });
+
+  test("default projectRoot is process.cwd()", async () => {
+    // Create a file in the actual cwd
+    const cwdFile = join(process.cwd(), ".open-context-mode-test-cwd-" + Date.now() + ".tmp");
+    writeFileSync(cwdFile, "cwd content", "utf-8");
+
+    try {
+      const executor = new PolyglotExecutor({ runtimes });
+
+      const r = await executor.executeFile({
+        path: cwdFile,
+        language: "javascript",
+        code: `console.log(FILE_CONTENT.trim());`,
+      });
+
+      assert.equal(r.exitCode, 0, `Expected exit 0: ${r.stderr}`);
+      assert.ok(r.stdout.includes("cwd content"));
+    } finally {
+      rmSync(cwdFile, { force: true });
+    }
+  });
+});
+
+describe("CLAUDE_PROJECT_DIR env var integration", () => {
+  test("PolyglotExecutor accepts projectRoot option", async () => {
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: "/some/custom/path",
+    });
+
+    // Verify the executor was created without error
+    // The projectRoot is private, so we verify it indirectly via executeFile
+    assert.ok(executor, "Executor should be created with custom projectRoot");
+  });
+
+  test("executeFile fails gracefully for non-existent relative path", async () => {
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: projectDir,
+    });
+
+    const r = await executor.executeFile({
+      path: "does-not-exist.json",
+      language: "javascript",
+      code: `console.log(FILE_CONTENT);`,
+    });
+
+    assert.notEqual(r.exitCode, 0, "Should fail for non-existent file");
+  });
+});
+
+describe("Multi-language relative path resolution", () => {
+  if (runtimes.python) {
+    test("Python: relative path resolves against projectRoot", async () => {
+      const executor = new PolyglotExecutor({
+        runtimes,
+        projectRoot: projectDir,
+      });
+
+      const r = await executor.executeFile({
+        path: testFileName,
+        language: "python",
+        code: `
+import json
+data = json.loads(FILE_CONTENT)
+print(f"msg: {data['message']}")
+print(f"count: {data['count']}")
+        `,
+      });
+
+      assert.equal(r.exitCode, 0, `Expected exit 0: ${r.stderr}`);
+      assert.ok(r.stdout.includes("msg: hello from project dir"));
+      assert.ok(r.stdout.includes("count: 42"));
+    });
+  }
+
+  test("Shell: relative path resolves against projectRoot", async () => {
+    const executor = new PolyglotExecutor({
+      runtimes,
+      projectRoot: projectDir,
+    });
+
+    const r = await executor.executeFile({
+      path: testFileName,
+      language: "shell",
+      code: `echo "content: $FILE_CONTENT"`,
+    });
+
+    assert.equal(r.exitCode, 0, `Expected exit 0: ${r.stderr}`);
+    assert.ok(r.stdout.includes("hello from project dir"));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_index: projectRoot path resolution (#365)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mirrors the executeFile relative-path resolution tests (line ~598). Confirms
+// that open_ctx_index resolves a relative `path` argument against the detected
+// project directory (CLAUDE_PROJECT_DIR / *_PROJECT_DIR / OPEN_CONTEXT_MODE_PROJECT_DIR
+// → cwd fallback) instead of the MCP server process cwd. End-to-end via
+// JSON-RPC against a freshly spawned server with an injected project dir.
+
+describe("open_ctx_index: projectRoot path resolution (#365)", () => {
+  const ctxProjectDir = mkdtempSync(join(tmpdir(), "open_ctx-index-projroot-"));
+  const ctxFileName = "open_ctx-index-projroot-target.md";
+  const uniqueMarker = `open_ctx-index-marker-${process.pid}-${Date.now()}`;
+
+  beforeAll(() => {
+    writeFileSync(join(ctxProjectDir, ctxFileName), `# open_ctx_index relative path test\n\nUnique marker: ${uniqueMarker}\n`, "utf-8");
+  });
+
+  afterAll(() => {
+    rmSync(ctxProjectDir, { recursive: true, force: true });
+  });
+
+  function spawnServerWithProjectDir(projectDirEnv: string): ChildProcess {
+    return spawn("node", [mcpEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+        OPENCODE_PROJECT_DIR: projectDirEnv,
+      },
+    });
+  }
+
+  // MCP server processes JSON-RPC requests concurrently — we have to wait for
+  // each response before sending the next one in tests that depend on order
+  // (e.g. index then search). The shared `collectRpcResponses` helper kills
+  // the proc once all expected ids arrive, so we use it serially per-call.
+  async function awaitRpc(
+    proc: ChildProcess,
+    id: number,
+    request: Record<string, unknown>,
+    timeoutMs = 15_000,
+  ): Promise<DoctorJsonRpcResponse | undefined> {
+    return new Promise((resolve) => {
+      let buffer = "";
+      const onData = (d: Buffer) => {
+        buffer += d.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+            if (parsed.id === id) {
+              proc.stdout!.off("data", onData);
+              clearTimeout(timer);
+              resolve(parsed);
+              return;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+      const timer = setTimeout(() => {
+        proc.stdout!.off("data", onData);
+        resolve(undefined);
+      }, timeoutMs);
+      proc.stdout!.on("data", onData);
+      sendRpc(proc, request);
+    });
+  }
+
+  test("OPEN_CONTEXT_MODE_MAX_LIMIT raises the per-query cap end-to-end (#1097)", async () => {
+    const sharedTerm = "xyloquantummarker";
+    const markers = Array.from({ length: 6 }, (_, i) => "sec" + (i + 1) + sharedTerm);
+    const deepFile = join(ctxProjectDir, "deep-dive-" + sharedTerm + ".md");
+    const body = markers.map((m, i) => "## Section " + (i + 1) + "\n\nCommon " + sharedTerm + " anchor " + m + " tail").join("\n");
+    writeFileSync(deepFile, body, "utf8");
+    const countMarkers = (text: string) => markers.filter((m) => text.includes(m)).length;
+
+    // Default: flood-guard cap of 2 per query.
+    const procDefault = spawnServerWithProjectDir(ctxProjectDir);
+    try {
+      await awaitRpc(procDefault, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-maxlimit-default", version: "1.0" },
+        },
+      });
+      sendRpc(procDefault, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      await awaitRpc(procDefault, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: deepFile } },
+      });
+      const resp = await awaitRpc(procDefault, 101, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_search",
+          arguments: { queries: [sharedTerm], limit: 10 },
+        },
+      });
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      expect(countMarkers(text)).toBe(2);
+    } finally {
+      try {
+        procDefault.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+
+    // Override: same index, cap widened to 5 - spawn inherits process.env.
+    process.env.OPEN_CONTEXT_MODE_MAX_LIMIT = "5";
+    const procOverride = spawnServerWithProjectDir(ctxProjectDir);
+    try {
+      await awaitRpc(procOverride, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-maxlimit-override", version: "1.0" },
+        },
+      });
+      sendRpc(procOverride, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      await awaitRpc(procOverride, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: deepFile } },
+      });
+      const resp = await awaitRpc(procOverride, 101, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_search",
+          arguments: { queries: [sharedTerm], limit: 10 },
+        },
+      });
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      expect(countMarkers(text)).toBe(5);
+    } finally {
+      delete process.env.OPEN_CONTEXT_MODE_MAX_LIMIT;
+      try {
+        procOverride.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 45_000);
+  test("absolute path bypasses project-dir resolution", async () => {
+    const absFile = join(ctxProjectDir, ctxFileName);
+    const proc = spawnServerWithProjectDir("/non-existent-dir-on-purpose");
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-index-pr365-abs", version: "1.0" },
+        },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: absFile } },
+      });
+
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+      // Strengthened (FIX 3/10 C): assert the stored source label equals the
+      // absolute path verbatim. Server defaults source = path when caller does
+      // not pass an explicit source; the response text reports `from: <label>`,
+      // so finding the absolute path here proves the resolver passed it
+      // through intact instead of e.g. silently rewriting under projectDir.
+      expect(indexText).toContain(`from: ${absFile}`);
+
+      // Cross-check the same label round-trips through the FTS5 store: a
+      // open_ctx_search scoped to source = <abs path> must surface the file's
+      // unique marker. If the new resolver code path were skipped, the
+      // absolute path would not be a valid lookup key here.
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_search",
+          arguments: { queries: [uniqueMarker], source: absFile },
+        },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(uniqueMarker);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX 3/10 — negative-path coverage for open_ctx_index path resolution.
+  //
+  // PR #365 added happy-path tests above. The two tests below pin the P0
+  // negative behaviors that those tests miss:
+  //   A. `../` path traversal → currently allowed (trust-boundary policy).
+  //      Pinned so future security-jail PRs surface the policy change here.
+  //   B. ALL `*_PROJECT_DIR` envs unset → resolver falls back to spawned
+  //      server's process.cwd().
+  //   C. (above) Strengthens the absolute-path test with a source-label
+  //      round-trip.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  test("relative `../` path traversal still resolves and reads (current trust-boundary policy)", async () => {
+    // Layout: <baseDir>/escape.md  +  <baseDir>/sub1/sub2 (= projectDir)
+    // From projectDir, "../../escape.md" climbs back to <baseDir>/escape.md.
+    const baseDir = mkdtempSync(join(tmpdir(), "open_ctx-index-traversal-"));
+    const traversalProjectDir = join(baseDir, "sub1", "sub2");
+    mkdirSync(traversalProjectDir, { recursive: true });
+    const traversalMarker = `open_ctx-index-traversal-marker-${process.pid}-${Date.now()}`;
+    writeFileSync(join(baseDir, "escape.md"), `# Path traversal target\n\nUnique marker: ${traversalMarker}\n`, "utf-8");
+
+    const proc = spawnServerWithProjectDir(traversalProjectDir);
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-index-fix3-traversal", version: "1.0" },
+        },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "../../escape.md" } },
+      });
+
+      // Current policy: open_ctx_index trusts the host IDE's project boundary and
+      // does not jail relative paths. A `../` escape that points at a real
+      // file is RESOLVED and READ. If a future security PR introduces a
+      // jail, this assertion will fail and force an explicit policy update.
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+
+      // Confirm the file's contents actually entered the store (not a
+      // silent no-op masquerading as success).
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_search",
+          arguments: { queries: [traversalMarker] },
+        },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(traversalMarker);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("no *_PROJECT_DIR env set → relative path falls back to spawned-server cwd", async () => {
+    // Strip every project-dir env the resolver chain consults (see
+    // server.ts getProjectDir) so resolution is forced down to process.cwd().
+    // start.mjs would re-set OPEN_CONTEXT_MODE_PROJECT_DIR and CLAUDE_PROJECT_DIR
+    // from originalCwd — that originalCwd is the `cwd` we hand to spawn(),
+    // which is exactly what we want to assert on.
+    const fallbackCwd = mkdtempSync(join(tmpdir(), "open_ctx-index-cwdfallback-"));
+    const fallbackFile = "t.md";
+    const fallbackMarker = `open_ctx-index-cwdfallback-marker-${process.pid}-${Date.now()}`;
+    writeFileSync(join(fallbackCwd, fallbackFile), `# cwd fallback target\n\nUnique marker: ${fallbackMarker}\n`, "utf-8");
+
+    const strippedEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v !== "string") continue;
+      if (/_PROJECT_DIR$/.test(k)) continue;
+      if (k === "VSCODE_CWD") continue;
+      strippedEnv[k] = v;
+    }
+    strippedEnv.OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK = "1";
+
+    const proc = spawn("node", [mcpEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: fallbackCwd,
+      env: strippedEnv,
+    });
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-index-fix3-cwd", version: "1.0" },
+        },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: fallbackFile } },
+      });
+
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_search",
+          arguments: { queries: [fallbackMarker] },
+        },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(fallbackMarker);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+      // fallbackCwd is the child's cwd: it stays locked on Windows until the
+      // process truly exits, so an immediate rmSync throws EPERM there.
+      if (proc.exitCode === null) {
+        await new Promise<void>((resolve) => {
+          proc.once("exit", resolve);
+          setTimeout(() => {
+            try {
+              proc.kill("SIGKILL");
+            } catch {
+              /* best effort */
+            }
+          }, 5000).unref();
+        });
+      }
+      rmSync(fallbackCwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("relative path label canonicalizes to resolved absolute path", async () => {
+    const proc = spawnServerWithProjectDir(ctxProjectDir);
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-index-pr365-label", version: "1.0" },
+        },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: ctxFileName } },
+      });
+
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      // Label must canonicalize to the resolved absolute path so the same file
+      // indexed via './foo.md', 'foo.md', and 'subdir/../foo.md' produces a
+      // single FTS5 row (sources.label is the dedup key).
+      const expectedAbs = join(ctxProjectDir, ctxFileName);
+      expect(indexText).toContain(`from: ${expectedAbs}`);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  // Source-label dedup regression: when no explicit `source` is supplied,
+  // open_ctx_index must default the FTS5 label to the *resolved* absolute path so
+  // that the same file indexed via './foo.md', 'foo.md', or 'subdir/../foo.md'
+  // collapses into a single row (sources.label is the dedup key).
+  //
+  // This pins behavior at two layers:
+  //   1. The store-level dedup contract: identical labels overwrite, distinct
+  //      labels produce distinct rows.
+  //   2. The open_ctx_index source-resolution decision lives in src/server.ts and
+  //      must read `source ?? resolvedPath`, NOT `source ?? path` (which would
+  //      preserve raw user-typed input and break dedup).
+  test("source-label dedup: identical labels collapse, raw user-typed paths would not", () => {
+    const store = new ContentStore(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "source-label-dedup-"));
+    const file = "foo.md";
+    const abs = join(dir, file);
+    const marker = `dedup-marker-${process.pid}-${Date.now()}`;
+    writeFileSync(abs, `# foo\n\nUnique marker: ${marker}\n`, "utf-8");
+
+    try {
+      // Post-fix simulation: server canonicalizes both spellings to `abs`
+      // before calling store.index → single label → single row.
+      store.index({
+        content: readFileSync(abs, "utf-8"),
+        path: abs,
+        source: abs,
+      });
+      store.index({
+        content: readFileSync(abs, "utf-8"),
+        path: abs,
+        source: abs,
+      });
+
+      const dedupResults = store.search(marker, 10);
+      expect(dedupResults.length).toBe(1);
+      expect(dedupResults[0].source).toBe(abs);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Server-side guard: the caller label must be COMPOSED with the file so two
+  // open_ctx_index calls sharing a source don't delete each other's chunks (#914),
+  // and the fallback must canonicalize to resolvedPath, not to the raw
+  // user-typed `path`. Validates the actual src/server.ts decision so a
+  // regression fails CI before bundle rebuild and spawn coverage.
+  test("source-label canonicalization: open_ctx_index composes the label and falls back to resolvedPath", () => {
+    const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+    // The composition the CLI has had since #914, now on the MCP surface too.
+    expect(serverSrc).toMatch(/composeSourceLabel\(source,\s*resolvedPath\)/);
+    // The fallback canonicalizes to resolvedPath, never to raw `path`.
+    expect(serverSrc).toMatch(/source \?\? resolvedPath/);
+    // Negative guard: no place in open_ctx_index falls back to raw `path`.
+    expect(serverSrc).not.toMatch(/store\.index\(\{[^}]*source:\s*source\s*\?\?\s*path[\s,}]/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_index: Read deny-policy enforcement (#442)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Real-MCP integration test: open_ctx_execute_file calls checkFilePathDenyPolicy
+// before reading the file, but open_ctx_index historically skipped the check —
+// any file readable by the MCP server process could be indexed into FTS5
+// and exfiltrated through open_ctx_search. This pins the fix end-to-end via
+// JSON-RPC against a freshly spawned server with .claude/settings.json
+// containing a Read deny pattern matching the target file.
+
+describe("open_ctx_index: Read deny-policy enforcement (#442)", () => {
+  // Per-test projectDir prevents FTS5 cross-pollution between tests and
+  // removes order-coupling on the empty-store cross-check.
+  // OpenCode's own permission shape: the tool is the KEY and the glob is
+  // the entry. Rules arrive below as "Read(<glob>)", so unwrap them.
+  function writeDenyPolicy(projectDir: string, globs: string[]): void {
+    writeFileSync(
+      join(projectDir, "opencode.json"),
+      JSON.stringify({ permission: { read: Object.fromEntries(globs.map((g) => [g, "deny"])) } }),
+      "utf-8",
+    );
+  }
+
+  function setupProject(denyRules: string[], files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "open_ctx-index-deny-"));
+    writeDenyPolicy(
+      dir,
+      denyRules.map((rule) => rule.replace(/^[A-Za-z_]+\((.*)\)$/, "$1")),
+    );
+    for (const [rel, content] of Object.entries(files)) {
+      const full = join(dir, rel);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, content, "utf-8");
+    }
+    return dir;
+  }
+
+  function spawnServerInProject(projectDir: string, extraEnv: Record<string, string> = {}): ChildProcess {
+    return spawn("node", [mcpEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+        OPENCODE_PROJECT_DIR: projectDir,
+        ...extraEnv,
+      },
+    });
+  }
+
+  // Rejects on timeout (rather than resolving undefined) so silent
+  // server-spawn / import failures surface as a failing test instead of
+  // false-positive assertions on optional-chained undefined access.
+  async function awaitRpc(
+    proc: ChildProcess,
+    request: Record<string, unknown> & { id: number },
+    timeoutMs = 15_000,
+  ): Promise<DoctorJsonRpcResponse> {
+    const id = request.id;
+    return new Promise((resolve, reject) => {
+      let buffer = "";
+      let stderr = "";
+      const onStderr = (d: Buffer) => {
+        stderr += d.toString();
+      };
+      const onData = (d: Buffer) => {
+        buffer += d.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+            if (parsed.id === id) {
+              proc.stdout!.off("data", onData);
+              proc.stderr!.off("data", onStderr);
+              clearTimeout(timer);
+              resolve(parsed);
+              return;
+            }
+          } catch {
+            /* not JSON-RPC line */
+          }
+        }
+      };
+      const timer = setTimeout(() => {
+        proc.stdout!.off("data", onData);
+        proc.stderr!.off("data", onStderr);
+        reject(
+          new Error(`awaitRpc timeout after ${timeoutMs}ms for id=${id} method=${request.method}\n` + `stderr: ${stderr.slice(-2000)}`),
+        );
+      }, timeoutMs);
+      proc.stdout!.on("data", onData);
+      proc.stderr!.on("data", onStderr);
+      sendRpc(proc, request);
+    });
+  }
+
+  async function initServer(proc: ChildProcess, clientName: string): Promise<void> {
+    await awaitRpc(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: clientName, version: "1.0" },
+      },
+    });
+    sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+  }
+
+  function killProc(proc: ChildProcess): void {
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      /* best effort */
+    }
+  }
+
+  test("open_ctx_index({ path: <denied> }) returns deny-policy error and never indexes", async () => {
+    const secretMarker = `secret-marker-${process.pid}-${Date.now()}`;
+    const projectDir = setupProject(["Read(./secret.env)", "Read(secret.env)"], { "secret.env": `SECRET_TOKEN=${secretMarker}\n` });
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-deny-442");
+
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "secret.env" } },
+      });
+
+      expect(indexResp.error).toBeUndefined();
+      expect(indexResp.result?.isError).toBe(true);
+      const indexText = indexResp.result?.content?.[0]?.text ?? "";
+      expect(indexText).toContain("blocked by security policy");
+      expect(indexText).toContain("Read deny pattern");
+      // Pin the matched pattern so a future bug firing the wrong rule
+      // cannot pass on the generic substring alone.
+      expect(indexText).toMatch(/Read deny pattern \.?\/?secret\.env/);
+      expect(indexText).not.toMatch(/Indexed \d+ section/);
+
+      // Per-test projectDir guarantees an empty FTS5 store, so the secret
+      // marker absence is the load-bearing exfil-prevention pin.
+      const searchResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: { name: "open_ctx_search", arguments: { queries: [secretMarker] } },
+      });
+      expect(searchResp.error).toBeUndefined();
+      const searchText = searchResp.result?.content?.[0]?.text ?? "";
+      const searchedEmpty = searchText.includes("No results found") || searchText.includes("After indexing");
+      expect(searchedEmpty).toBe(true);
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index({ path: <denied via glob *.env> }) blocks", async () => {
+    const projectDir = setupProject(["Read(*.env)"], {
+      "secret.env": `SECRET_TOKEN=glob-${process.pid}\n`,
+    });
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-deny-glob-442");
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "secret.env" } },
+      });
+      expect(indexResp.result?.isError).toBe(true);
+      const text = indexResp.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("blocked by security policy");
+      expect(text).toMatch(/Read deny pattern .*\*\.env/);
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index({ path: <absolute denied> }) blocks", async () => {
+    const projectDir = setupProject(
+      [], // populated below after we know absolute path
+      { "secret.env": `SECRET_TOKEN=abs-${process.pid}\n` },
+    );
+    const absSecret = join(projectDir, "secret.env");
+    // Rewrite the policy with the absolute deny glob.
+    writeDenyPolicy(projectDir, [absSecret]);
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-deny-abs-442");
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: absSecret } },
+      });
+      expect(indexResp.result?.isError).toBe(true);
+      const text = indexResp.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("blocked by security policy");
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index({ path: <denied via ../traversal> }) blocks", async () => {
+    // Use a glob deny rule that matches the canonical (lexical/realpath)
+    // form — proves evaluateFilePath's canonicalization defeats the
+    // `sub/../secret.env` traversal trick.
+    const projectDir = setupProject(["Read(**/secret.env)"], {
+      "secret.env": `SECRET_TOKEN=trav-${process.pid}\n`,
+      "sub/placeholder.md": "# placeholder\n",
+    });
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-deny-trav-442");
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "sub/../secret.env" } },
+      });
+      expect(indexResp.result?.isError).toBe(true);
+      const text = indexResp.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("blocked by security policy");
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index({ path: <allowed> }) succeeds and is searchable", async () => {
+    const allowedMarker = `allowed-marker-${process.pid}-${Date.now()}`;
+    const projectDir = setupProject(["Read(./secret.env)", "Read(secret.env)"], { "public-doc.md": `# Public doc\n\n${allowedMarker}\n` });
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-allow-442");
+
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "public-doc.md" } },
+      });
+      expect(indexResp.error).toBeUndefined();
+      expect(indexResp.result?.isError).toBeFalsy();
+      const indexText = indexResp.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+
+      const searchResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: { name: "open_ctx_search", arguments: { queries: [allowedMarker] } },
+      });
+      expect(searchResp.error).toBeUndefined();
+      expect(searchResp.result?.content?.[0]?.text ?? "").toContain(allowedMarker);
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index({ content: ... }) bypass branch — gate truly tied to `path`", async () => {
+    // Configure a deny rule that WOULD match the inline `source` value if
+    // the gate naively ran on it. Success here proves the bypass is keyed
+    // on `path` absence, not on `source`.
+    const projectDir = setupProject(["Read(test-inline)", "Read(./test-inline)"], {});
+    const proc = spawnServerInProject(projectDir);
+    try {
+      await initServer(proc, "open_ctx-index-content-442");
+      const inlineMarker = `inline-marker-${process.pid}-${Date.now()}`;
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_index",
+          arguments: {
+            content: `# Inline\n\n${inlineMarker}\n`,
+            source: "test-inline",
+          },
+        },
+      });
+      expect(indexResp.error).toBeUndefined();
+      expect(indexResp.result?.isError).toBeFalsy();
+      expect(indexResp.result?.content?.[0]?.text ?? "").toMatch(/Indexed \d+ section/);
+    } finally {
+      killProc(proc);
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("open_ctx_index returns an actionable storage error when OPEN_CONTEXT_MODE_DIR is unwritable", async () => {
+    if (process.platform === "win32") return;
+
+    const projectDir = setupProject([], {
+      "public-doc.md": "storage failure contract",
+    });
+    const storageRoot = mkdtempSync(join(tmpdir(), "open_ctx-storage-deny-"));
+    chmodSync(storageRoot, 0o500);
+    const proc = spawnServerInProject(projectDir, {
+      OPEN_CONTEXT_MODE_DIR: storageRoot,
+    });
+
+    try {
+      await initServer(proc, "open_ctx-index-storage-error");
+
+      const indexResp = await awaitRpc(proc, {
+        jsonrpc: "2.0",
+        id: 103,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "public-doc.md" } },
+      });
+
+      expect(indexResp.error).toBeUndefined();
+      expect(indexResp.result?.isError).toBe(true);
+      expect(indexResp.result?.content?.[0]?.text).toContain("open-context-mode content directory is not writable:");
+      expect(indexResp.result?.content?.[0]?.text).toContain("Set OPEN_CONTEXT_MODE_DIR to a writable absolute path.");
+    } finally {
+      killProc(proc);
+      chmodSync(storageRoot, 0o700);
+      rmSync(storageRoot, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_insight: execFile migration + port schema hardening (#441)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Three layers of regression protection:
+//
+//   1. Coarse source guard — `src/server.ts` must not reintroduce the
+//      `execSync(\`…${…}…\`)` template-string injection pattern anywhere.
+//      Behavioral coverage of the helpers themselves lives below in this
+//      same file (mocked spawnSync, asserts argv arrays + no shell:true +
+//      Windows LISTENING anchoring + per-pid failure isolation).
+//
+//   2. Cross-reference — server.ts must define the structured helpers
+//      (openBrowserSync / killProcessOnPort) inline so the handler can
+//      surface auto-open / kill failures to the agent rather than silently
+//      reporting success.
+//
+//   3. Real-MCP integration — spawn the server via stdio JSON-RPC and
+//      verify the tightened port schema rejects out-of-range and
+//      non-integer values BEFORE the handler runs.
+
+describe("open_ctx_insight: execFile migration source guard (#441)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("server.ts contains no execSync template-string interpolation anywhere", () => {
+    // Match: execSync(`...${...}...`) — the original injection pattern.
+    // Scoped to the entire file (not just the open_ctx_insight handler) because
+    // any reintroduction of the pattern in server.ts is a regression worth
+    // catching.
+    const templateInterpolation = /execSync\(`[^`]*\$\{/m;
+    expect(serverSrc).not.toMatch(templateInterpolation);
+  });
+
+  test("server.ts defines structured helpers (openBrowserSync, killProcessOnPort)", () => {
+    // The helpers must be the ones that return BrowserOpenResult / KillResult
+    // so the open_ctx_insight handler can surface failures. They live inline in
+    // server.ts (PR #452 folded the prior src/process-utils.ts back in).
+    expect(serverSrc).toMatch(/export function openBrowserSync\b/);
+    expect(serverSrc).toMatch(/export function killProcessOnPort\b/);
+    expect(serverSrc).toMatch(/export type BrowserOpenResult\b/);
+    expect(serverSrc).toMatch(/export type KillResult\b/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_execute_file: projectRoot env cascade parity with open_ctx_index
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Regression for PR #365 follow-up. open_ctx_index was routed through the
+// `getProjectDir()` env cascade (CLAUDE_PROJECT_DIR → ... → OPEN_CONTEXT_MODE_PROJECT_DIR
+// → cwd) but the PolyglotExecutor still captured CLAUDE_PROJECT_DIR ?? cwd
+// at construction time. open_ctx_execute_file therefore resolved the same
+// relative path differently from open_ctx_index whenever only
+// OPEN_CONTEXT_MODE_PROJECT_DIR was set (e.g. Cursor / OpenClaw / Codex spawns).
+// Fix: executor now resolves projectRoot lazily via the server's getProjectDir.
+
+describe("open_ctx_execute_file: OPEN_CONTEXT_MODE_PROJECT_DIR env cascade", () => {
+  const execProjectDir = mkdtempSync(join(tmpdir(), "open_ctx-exec-projroot-"));
+  const execScriptDir = join(execProjectDir, "rel");
+  const execScriptName = "script.js";
+  const execMarker = `open_ctx-exec-marker-${process.pid}-${Date.now()}`;
+
+  // Spawn build/server.js directly to bypass start.mjs's auto-set of
+  // CLAUDE_PROJECT_DIR = process.cwd(). That auto-set would defeat the
+  // test by injecting a CLAUDE_PROJECT_DIR before getProjectDir() can
+  // fall through to OPEN_CONTEXT_MODE_PROJECT_DIR.
+  const buildServerEntry = resolve(__dirname, "..", "..", "build", "server.js");
+
+  beforeAll(() => {
+    mkdirSync(execScriptDir, { recursive: true });
+    writeFileSync(join(execScriptDir, execScriptName), `console.log(${JSON.stringify(execMarker)});\n`, "utf-8");
+  });
+
+  afterAll(() => {
+    rmSync(execProjectDir, { recursive: true, force: true });
+  });
+
+  function spawnServerCtxModeOnly(projectDirEnv: string): ChildProcess {
+    // Strip every CLAUDE_*-style projectDir signal so the executor MUST
+    // fall back through the env cascade to OPEN_CONTEXT_MODE_PROJECT_DIR.
+    const env = { ...process.env, OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1" };
+    delete env.CLAUDE_PROJECT_DIR;
+    delete env.GEMINI_PROJECT_DIR;
+    delete env.VSCODE_CWD;
+    delete env.OPENCODE_PROJECT_DIR;
+    delete env.PI_PROJECT_DIR;
+    delete env.IDEA_INITIAL_DIRECTORY;
+    env.OPEN_CONTEXT_MODE_PROJECT_DIR = projectDirEnv;
+    return spawn("node", [buildServerEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+      // cwd far from execProjectDir so a stale `process.cwd()` snapshot
+      // would resolve `rel/script.js` to a non-existent path.
+      cwd: tmpdir(),
+    });
+  }
+
+  async function awaitRpc(
+    proc: ChildProcess,
+    id: number,
+    request: Record<string, unknown>,
+    timeoutMs = 15_000,
+  ): Promise<DoctorJsonRpcResponse | undefined> {
+    return new Promise((res) => {
+      let buffer = "";
+      const onData = (d: Buffer) => {
+        buffer += d.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+            if (parsed.id === id) {
+              proc.stdout!.off("data", onData);
+              clearTimeout(timer);
+              res(parsed);
+              return;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+      const timer = setTimeout(() => {
+        proc.stdout!.off("data", onData);
+        res(undefined);
+      }, timeoutMs);
+      proc.stdout!.on("data", onData);
+      sendRpc(proc, request);
+    });
+  }
+
+  test("relative path resolves against OPEN_CONTEXT_MODE_PROJECT_DIR when CLAUDE_PROJECT_DIR is unset", async () => {
+    const proc = spawnServerCtxModeOnly(execProjectDir);
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "open_ctx-exec-cm-projdir", version: "1.0" },
+        },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const execResp = await awaitRpc(proc, 200, {
+        jsonrpc: "2.0",
+        id: 200,
+        method: "tools/call",
+        params: {
+          name: "open_ctx_execute_file",
+          arguments: {
+            path: `rel/${execScriptName}`,
+            language: "javascript",
+            code: "eval(FILE_CONTENT);",
+          },
+        },
+      });
+
+      expect(execResp?.error).toBeUndefined();
+      expect(execResp?.result?.isError ?? false).toBe(false);
+      const text = execResp?.result?.content?.[0]?.text ?? "";
+      expect(text).toContain(execMarker);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. Subagent Output Budget (subagent-budget)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const HOOK_PATH = join(__dirname, "..", "..", "hooks", "pretooluse.mjs");
+const LIVE = process.argv.includes("--live");
+
+/**
+ * TypeScript mock of hooks/pretooluse.mjs routing logic.
+ * Replicates Task branch behavior without bash/jq dependency.
+ */
+function runHook(input: Record<string, unknown>): string {
+  const toolName = (input as any).tool_name ?? "";
+  const toolInput = (input as any).tool_input ?? {};
+
+  if (toolName === "Task") {
+    const subagentType = toolInput.subagent_type ?? "";
+    const prompt = toolInput.prompt ?? "";
+
+    if (subagentType === "Bash") {
+      return JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          updatedInput: {
+            ...toolInput,
+            prompt: prompt + ROUTING_BLOCK,
+            subagent_type: "general-purpose",
+          },
+        },
+      });
+    }
+
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: {
+          ...toolInput,
+          prompt: prompt + ROUTING_BLOCK,
+        },
+      },
+    });
+  }
+
+  // Non-Task tools return empty (passthrough)
+  return "";
+}
+
+describe("Hook Injection", () => {
+  test("Task hook injects context_window_protection XML block", () => {
+    const output = runHook({
+      tool_name: "Task",
+      tool_input: {
+        prompt: "Research zod npm package",
+        subagent_type: "general-purpose",
+      },
+    });
+    const parsed = JSON.parse(output);
+    const prompt = parsed.hookSpecificOutput.updatedInput.prompt;
+    assert.ok(prompt.includes("<context_window_protection>"), "Should inject context_window_protection opening tag");
+    assert.ok(prompt.includes("</context_window_protection>"), "Should inject context_window_protection closing tag");
+  });
+
+  test("Task hook injects output constraints and tool hierarchy", () => {
+    const output = runHook({
+      tool_name: "Task",
+      tool_input: { prompt: "Research zod", subagent_type: "general-purpose" },
+    });
+    const parsed = JSON.parse(output);
+    const prompt = parsed.hookSpecificOutput.updatedInput.prompt;
+    assert.ok(prompt.includes("<output_constraints>"), "Should inject output_constraints");
+    // Pillar 4 (caveman/Output Compression) retired in #482. Routing block
+    // must NOT push a prose-style directive — assert the negative.
+    assert.ok(!prompt.toLowerCase().includes("terse like caveman"), "Routing block must not contain caveman/terse style directive");
+    assert.ok(!prompt.includes("<communication_style>"), "Routing block must not contain communication_style block");
+    assert.ok(prompt.includes("<tool_selection_hierarchy>"), "Should inject tool_selection_hierarchy");
+    // PR #683 follow-up (ADR-0002 + ADR-0003 hook prompt-surface contract):
+    // <forbidden_actions> renamed to <when_not_to_use> to drop the
+    // Constitutional-AI-trigger container name (rubric #9). Semantic intent
+    // — "Bash, Read, WebFetch, open_ctx_execute have wrong-tool selection cues
+    // injected into every session" — is preserved and asserted here.
+    assert.ok(
+      prompt.includes("<when_not_to_use>"),
+      "Should inject when_not_to_use (the affirmative successor to <forbidden_actions>, ADR-0002)",
+    );
+  });
+
+  test("Task hook injects batch_execute as primary tool", () => {
+    const output = runHook({
+      tool_name: "Task",
+      tool_input: { prompt: "Analyze repo", subagent_type: "Explore" },
+    });
+    const parsed = JSON.parse(output);
+    const prompt = parsed.hookSpecificOutput.updatedInput.prompt;
+    assert.ok(prompt.includes("batch_execute"), "Should mention batch_execute as primary tool");
+  });
+
+  test("Task hook upgrades Bash subagent to general-purpose", () => {
+    const output = runHook({
+      tool_name: "Task",
+      tool_input: { prompt: "Run git log", subagent_type: "Bash" },
+    });
+    const parsed = JSON.parse(output);
+    const updated = parsed.hookSpecificOutput.updatedInput;
+    assert.equal(updated.subagent_type, "general-purpose", "Bash should be upgraded to general-purpose");
+    assert.ok(updated.prompt.includes("<context_window_protection>"), "Upgraded subagent should also get context_window_protection");
+  });
+
+  test("Task hook preserves original prompt content", () => {
+    const original = "Research the architecture of Next.js App Router";
+    const output = runHook({
+      tool_name: "Task",
+      tool_input: { prompt: original, subagent_type: "general-purpose" },
+    });
+    const parsed = JSON.parse(output);
+    const prompt = parsed.hookSpecificOutput.updatedInput.prompt;
+    assert.ok(prompt.startsWith(original), "Original prompt should be preserved at the start");
+  });
+
+  test("Non-Task tools are not affected by output budget", () => {
+    const output = runHook({
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+    });
+    // Bash hook returns empty or redirect, never OUTPUT FORMAT
+    assert.ok(!output.includes("OUTPUT FORMAT"), "Bash tool should not get output format injection");
+  });
+});
+
+describe("Shared Knowledge Base (subagent -> main)", () => {
+  test("subagent index() is visible to main agent search()", () => {
+    // Same ContentStore instance = same as shared MCP server process
+    const store = new ContentStore(":memory:");
+
+    // Simulate subagent indexing its research
+    store.index({
+      content: [
+        "# Zod Overview",
+        "TypeScript-first schema validation library.",
+        "Zero dependencies, 98M weekly downloads.",
+        "",
+        "# API Reference",
+        "z.string(), z.number(), z.object() are the core primitives.",
+        "Use .parse() for runtime validation with type inference.",
+        "",
+        "# Recent Changes",
+        "v4.3.6: Performance improvements to object parsing.",
+        "v4.3.5: Fixed discriminated union edge case.",
+      ].join("\n"),
+      source: "subagent:zod-research",
+    });
+
+    // Simulate main agent searching subagent's indexed content
+    const results = store.search("weekly downloads", 1, "zod-research");
+    assert.ok(results.length > 0, "Main should find subagent's indexed content");
+    assert.ok(results[0].content.includes("98M"), "Should retrieve exact data from subagent's index");
+
+    const apiResults = store.search("parse validation", 1, "zod-research");
+    assert.ok(apiResults.length > 0, "Main should find API details");
+    assert.ok(apiResults[0].content.includes(".parse()"), "Should find .parse() reference");
+
+    store.close();
+  });
+
+  test("multiple subagents index into same KB with distinct sources", () => {
+    const store = new ContentStore(":memory:");
+
+    // Subagent A indexes architecture research
+    store.index({
+      content: "# Architecture\nMonorepo with pnpm workspaces. 15 packages.",
+      source: "subagent-A:architecture",
+    });
+
+    // Subagent B indexes API research
+    store.index({
+      content: "# API Endpoints\nREST + GraphQL. 47 endpoints total.",
+      source: "subagent-B:api",
+    });
+
+    // Subagent C indexes contributor analysis
+    store.index({
+      content: "# Contributors\nTop: @alice (312 commits), @bob (198 commits).",
+      source: "subagent-C:contributors",
+    });
+
+    // Main agent searches each subagent's findings by source
+    const arch = store.search("monorepo", 1, "subagent-A");
+    assert.ok(arch.length > 0 && arch[0].content.includes("pnpm"));
+
+    const api = store.search("endpoints", 1, "subagent-B");
+    assert.ok(api.length > 0 && api[0].content.includes("47"));
+
+    const contrib = store.search("commits", 1, "subagent-C");
+    assert.ok(contrib.length > 0 && contrib[0].content.includes("alice"));
+
+    // Cross-search without source filter finds all (OR mode for cross-chunk terms)
+    const all = store.search("monorepo endpoints commits", 5, undefined, "OR");
+    assert.ok(all.length >= 2, "Global search should find results from multiple subagents");
+
+    store.close();
+  });
+
+  test("main agent can search subagent KB after subagent is done", () => {
+    const store = new ContentStore(":memory:");
+
+    // Subagent lifecycle: index → close (subagent done)
+    store.index({
+      content: "# Security Audit\nNo critical vulnerabilities found. 3 medium severity issues in auth module.",
+      source: "subagent:security-audit",
+    });
+    // Subagent returns summary: "Indexed findings as 'subagent:security-audit'"
+
+    // Main agent picks up later and searches
+    const results = store.search("vulnerabilities auth", 1, "security-audit");
+    assert.ok(results.length > 0);
+    assert.ok(results[0].content.includes("3 medium severity"));
+
+    store.close();
+  });
+});
+
+describe("Context Budget Measurement", () => {
+  test("ideal subagent response is under 500 words / 2KB", () => {
+    // This is what a compliant subagent response should look like
+    const idealResponse = [
+      "## Summary",
+      "- Researched zod npm package using batch_execute (1 call, 5 commands)",
+      "- Indexed detailed findings as 'subagent:zod-research' (3 sections)",
+      "",
+      "## Key Findings",
+      "- TypeScript-first schema validation, zero dependencies",
+      "- v4.3.6 latest, 98.5M weekly downloads",
+      "- 541 contributors, Colin McDonnell primary maintainer",
+      "- MIT license, used by 2.8M+ projects",
+      "",
+      "## Indexed Sources",
+      "- `subagent:zod-research` — full API docs, version history, contributor list",
+      "",
+      "Use `search(source: 'subagent:zod-research')` for details.",
+    ].join("\n");
+
+    const words = idealResponse.split(/\s+/).filter((w) => w.length > 0).length;
+    const bytes = Buffer.byteLength(idealResponse);
+
+    assert.ok(words < 500, `Ideal response should be under 500 words, got ${words}`);
+    assert.ok(bytes < 2048, `Ideal response should be under 2KB, got ${bytes}`);
+  });
+
+  test("non-compliant response exceeds budget", () => {
+    // Simulate what happens WITHOUT the output budget — full inline dump
+    const bloatedResponse = Array.from(
+      { length: 50 },
+      (_, i) => `Line ${i}: Detailed information about zod feature ${i} with examples and code snippets...`,
+    ).join("\n");
+
+    const words = bloatedResponse.split(/\s+/).filter((w) => w.length > 0).length;
+    const bytes = Buffer.byteLength(bloatedResponse);
+
+    assert.ok(words > 500, "Bloated response should exceed 500 words");
+  });
+});
+
+// Live LLM test — only runs when --live flag is passed
+if (LIVE) {
+  describe("Live LLM Test (claude -p)", () => {
+    test("real subagent respects output budget", async () => {
+      const prompt = `Research the npm package "chalk" — what it does, latest version, weekly downloads. Keep it brief.`;
+
+      // Use claude CLI in pipe mode with haiku for speed
+      const result = spawnSync("claude", ["-p", "--model", "haiku", prompt], {
+        encoding: "utf-8",
+        timeout: 60_000,
+        env: { ...process.env },
+      });
+
+      if (result.error || result.status !== 0) {
+        console.log("    Skipped: claude CLI not available or errored");
+        console.log("    stderr:", result.stderr?.slice(0, 200));
+        return;
+      }
+
+      const response = result.stdout;
+      const words = response.split(/\s+/).filter((w: string) => w.length > 0).length;
+      const bytes = Buffer.byteLength(response);
+
+      // Soft assertion — LLM may not always comply perfectly
+      if (words > 500) {
+        console.log(`    WARNING: Response exceeded 500 word budget (${words} words)`);
+      }
+
+      assert.ok(words < 1000, `Response should be reasonable length, got ${words} words`);
+    });
+  });
+}
+
+// ─── open_ctx_purge is the ONLY reset mechanism ──────────────────────────────────
+
+describe("open_ctx_purge is the sole reset/wipe mechanism", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+  const routingBlockSrc = readFileSync(resolve(__dirname, "../../hooks/routing-block.mjs"), "utf-8");
+
+  // ── open_ctx_stats has NO reset capability ──
+  test("open_ctx_stats does NOT accept a reset parameter", () => {
+    // Extract only the open_ctx_stats tool registration
+    const statsMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_stats"[\s\S]*?^\);/m);
+    expect(statsMatch).not.toBeNull();
+    const statsBody = statsMatch![0];
+    expect(statsBody).not.toContain("reset");
+    expect(statsBody).not.toContain("resetSessionStats");
+  });
+
+  // ── No .clear-stats flag mechanism ──
+  test("server has no checkClearStatsFlag mechanism", () => {
+    expect(serverSrc).not.toContain("checkClearStatsFlag");
+    expect(serverSrc).not.toContain(".clear-stats");
+  });
+
+  // ── Routing block: no reset instructions for /clear or /compact ──
+  test("routing block does not instruct any reset after /clear or /compact", () => {
+    expect(routingBlockSrc).not.toContain("reset: true");
+    expect(routingBlockSrc).not.toContain("open_ctx_stats(reset");
+  });
+
+  test("routing block informs user about open_ctx_purge availability", () => {
+    expect(routingBlockSrc).toMatch(/ctx.purge/i);
+  });
+
+  // ── open_ctx_purge is the complete wipe tool ──
+  test("open_ctx_purge gates on confirm parameter", () => {
+    expect(serverSrc).toContain("Purge cancelled");
+    expect(serverSrc).toMatch(/if \(!confirm\)/);
+  });
+
+  test("open_ctx_purge wipes KB, session DB, events, and stats", () => {
+    const purgeMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m);
+    expect(purgeMatch).not.toBeNull();
+    const purgeBody = purgeMatch![0];
+    // 1. Closes the FTS5 knowledge base BEFORE wiping (releases Windows lock)
+    expect(purgeBody).toContain("store.cleanup()");
+    expect(purgeBody).toContain("_stores.delete(storePathForPurge)");
+    // 2. Delegates the on-disk wipe to the purgeSession deep module so all
+    //    file-kind sweeps (session DB, events.md, cleanup flag, FTS5 store,
+    //    legacy content) flow through ONE code path with uniform dual-hash.
+    expect(purgeBody).toContain("purgeSession({");
+    expect(purgeBody).toContain("projectDir: getProjectDir()");
+    expect(purgeBody).toContain("sessionsDir: getSessionDir()");
+    expect(purgeBody).toContain("storePath: storePathForPurge");
+    // 3. Resets in-memory stats
+    expect(purgeBody).toContain("sessionStats.calls = {}");
+    expect(purgeBody).toContain("sessionStats.sessionStart = Date.now()");
+    // 4. Confirms with list of deleted items
+    expect(purgeBody).toContain("Purged:");
+  });
+});
+
+// ─── Platform-aware session DB paths ─────────────────────────────────────────
+
+describe("Platform-aware session paths via adapter", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  // ── No hardcoded .claude in tool handlers ──
+  test("open_ctx_purge has no hardcoded .claude path", () => {
+    const purgeMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m);
+    expect(purgeMatch).not.toBeNull();
+    expect(purgeMatch![0]).not.toMatch(/["']\.claude["']/);
+  });
+
+  test("open_ctx_stats has no hardcoded .claude path", () => {
+    const statsMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_stats"[\s\S]*?^\);/m);
+    expect(statsMatch).not.toBeNull();
+    expect(statsMatch![0]).not.toMatch(/["']\.claude["']/);
+  });
+
+  // ── Adapter methods used for session paths (post-C2 narrowing) ──
+  test("session paths derived from adapter.getSessionDir + resolveSessionDbPath", () => {
+    // C2 narrowing (2026-05): adapter no longer exposes getSessionDBPath /
+    // getSessionEventsPath. server.ts must derive per-project DB paths via
+    // resolveSessionDbPath while reading the adapter ONLY for the platform
+    // sessionDir. Pin both calls so an accidental regression to a missing
+    // helper or a deleted adapter method is caught at the test boundary.
+    expect(serverSrc).toMatch(/getSessionDir\(/);
+    expect(serverSrc).toMatch(/resolveSessionDbPath\(/);
+  });
+
+  // ── Comprehensive projectDir detection ──
+  test("getProjectDir delegates to resolveProjectDir; chain lives in util/project-dir.ts", () => {
+    const fn = serverSrc.match(/function getProjectDir[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Server.ts MUST delegate so the env-var chain + plugin-path rejection
+    // is unified with start.mjs (see v1.0.113 hotfix).
+    expect(body).toContain("resolveProjectDir");
+    expect(body).toContain("process.env.PWD");
+    // Env-var chain itself moved to the shared resolver — pin its contract there.
+    const utilSrc = readFileSync(resolve(__dirname, "../../src/util/project-dir.ts"), "utf-8");
+    for (const v of [
+      "CLAUDE_PROJECT_DIR",
+      "GEMINI_PROJECT_DIR",
+      "VSCODE_CWD",
+      "OPENCODE_PROJECT_DIR",
+      "PI_PROJECT_DIR",
+      "IDEA_INITIAL_DIRECTORY",
+      "CURSOR_CWD",
+      "OPEN_CONTEXT_MODE_PROJECT_DIR",
+    ]) {
+      expect(utilSrc).toContain(v);
+    }
+    expect(utilSrc).toContain("isPluginInstallPath");
+    // Must NOT contain semantically wrong env vars
+    expect(utilSrc).not.toContain("OPENCLAW_HOME");
+  });
+
+  // Issue #521 Slice 2: transcriptsRoot is the Claude Code transcript dir
+  // (`~/.claude/projects`). Passing it on non-Claude-Code platforms (Cursor,
+  // OpenCode, Codex, ...) is wrong — the most-recently-modified jsonl could
+  // belong to an unrelated Claude Code window, returning that project's cwd
+  // to a Cursor MCP. getProjectDir() MUST gate transcriptsRoot on the active
+  // platform via detectPlatform(); only "claude-code" gets the path.
+  test("getProjectDir gates transcriptsRoot on detected platform (Claude Code only)", () => {
+    const fn = serverSrc.match(/function getProjectDir[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Must reference detectPlatform so the gate is dynamic per-process.
+    expect(body).toContain("detectPlatform");
+    // Must check for the claude-code platform string (literal — pinning the
+    // gate predicate so a typo or platform-id rename is caught here).
+    expect(body).toContain("claude-code");
+    // Still passes transcriptsRoot when the gate matches.
+    expect(body).toContain("transcriptsRoot");
+  });
+
+  // ── Content DB is platform-isolated (not shared) ──
+  test("getStorePath uses platform-specific dir, not shared ~/.open-context-mode/", () => {
+    const fn = serverSrc.match(/function getStorePath[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Must NOT use the shared platform-agnostic directory
+    expect(body).not.toContain('".open-context-mode"');
+    // Must derive content dir from adapter/session dir (platform-specific)
+    expect(body).toContain("resolveContentStorageDir(getDefaultSessionDir)");
+  });
+});
+
+// ─── Hash consistency ────────────────────────────────────────────────────────
+
+describe("Project dir hash consistency", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("server.ts imports canonical hash + path resolvers from session/db.js", () => {
+    // After the case-fold migration + content-store migration, all DB
+    // path computation lives in src/session/db.ts. The server MUST import
+    // resolveSessionDbPath + resolveContentStorePath rather than rolling
+    // its own hash + join inline.
+    expect(serverSrc).toMatch(/import\s*\{[^}]*resolveSessionDbPath[^}]*\}\s*from\s*"\.\/session\/db\.js"/);
+    expect(serverSrc).toMatch(/import\s*\{[^}]*resolveContentStorePath[^}]*\}\s*from\s*"\.\/session\/db\.js"/);
+    // The deleted local helpers MUST be gone — guards against accidental
+    // re-introduction that would split the case-fold contract.
+    expect(serverSrc).not.toMatch(/^function hashProjectDir\(/m);
+    expect(serverSrc).not.toMatch(/^function normalizeProjectDirForHash\(/m);
+  });
+
+  test("getStorePath delegates to resolveContentStorePath (auto case-fold migration)", () => {
+    const fn = serverSrc.match(/function getStorePath[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toContain("resolveContentStorePath");
+    // Must NOT have its own inline createHash call.
+    expect(fn![0]).not.toContain("createHash");
+  });
+
+  test("server storage paths are routed through runtime override resolver", () => {
+    expect(serverSrc).toContain("resolveSessionStorageDir");
+    expect(serverSrc).toContain("resolveContentStorageDir");
+    expect(serverSrc).toContain("resolveStatsStorageDir");
+    expect(serverSrc).toContain("ensureWritableStorageDir");
+    expect(serverSrc).toContain("formatStorageDirectoryError");
+  });
+
+  test("open_ctx_stats uses hashProjectDir, not inline hashing", () => {
+    const statsMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_stats"[\s\S]*?^\);/m);
+    expect(statsMatch).not.toBeNull();
+    expect(statsMatch![0]).toContain("hashProjectDir");
+    expect(statsMatch![0]).not.toContain("createHash");
+  });
+
+  test("open_ctx_purge uses hashProjectDir, not inline hashing", () => {
+    const purgeMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m);
+    expect(purgeMatch).not.toBeNull();
+    expect(purgeMatch![0]).toContain("hashProjectDir");
+    expect(purgeMatch![0]).not.toContain("createHash");
+  });
+
+  // ── B3b Slice 3.1: open_ctx_stats must scope getLifetimeStats to the active
+  //    adapter via getSessionDir(), not the hardcoded ~/.claude/ default.
+  //    Bug evidence: src/server.ts:2602/2612/2620 currently call
+  //    `getLifetimeStats()` with no args, so non-Claude platforms (Cursor,
+  //    OpenCode, JetBrains, ...) silently aggregate from the wrong dir.
+  //    Statusline at src/server.ts:540 already passes
+  //    `{ sessionsDir: getSessionDir() }` — the three open_ctx_stats sites must
+  //    mirror that contract exactly. Note: `getMultiAdapterLifetimeStats`
+  //    is NOT covered by this test because it takes `{ home }` and
+  //    intentionally defaults to homedir() to scan every adapter dir; the
+  //    bare-call form is correct for that helper.
+  test("open_ctx_stats scopes lifetime aggregation to the active adapter sessionsDir", () => {
+    const statsMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_stats"[\s\S]*?^\);/m);
+    expect(statsMatch).not.toBeNull();
+    const body = statsMatch![0];
+    // Every `getLifetimeStats(` invocation inside open_ctx_stats MUST be argumented
+    // (sessionsDir-aware). A bare `()` call falls back to the hardcoded
+    // ~/.claude/open-context-mode/sessions default and silently mis-attributes
+    // lifetime counts on non-Claude platforms. Use a negative lookbehind to
+    // exclude `getMultiAdapterLifetimeStats(` whose default is intentional.
+    const bareCalls = body.match(/(?<!MultiAdapter)getLifetimeStats\(\s*\)/g);
+    expect(bareCalls, "open_ctx_stats must not call getLifetimeStats() with no args").toBeNull();
+    // Should pass an object literal containing `sessionsDir` (mirrors the
+    // statusline contract at src/server.ts:540).
+    expect(body).toMatch(/getLifetimeStats\(\s*\{\s*sessionsDir:\s*getSessionDir\(\)/);
+  });
+
+  test("stats heartbeat reads the shared lifetime snapshot instead of scanning SessionDBs", () => {
+    const persistStats = serverSrc.match(/function persistStats\([\s\S]*?^\}/m);
+    expect(persistStats).not.toBeNull();
+    expect(persistStats![0]).toContain("readLifetimeTokenSnapshot");
+    expect(persistStats![0]).not.toContain("getLifetimeStats(");
+  });
+
+  test("open_ctx_stats publishes the explicitly requested lifetime aggregation", () => {
+    const statsMatch = serverSrc.match(/registerCtxTool\(\s*"open_ctx_stats"[\s\S]*?^\);/m);
+    expect(statsMatch).not.toBeNull();
+    expect(statsMatch![0]).toContain("publishLifetimeTokenSnapshot");
+  });
+
+  test("cold-start: main() seeds the shared snapshot once at boot (#1111 fork adaptation)", () => {
+    // Upstream leaves lifetime at zero until the first explicit open_ctx_stats;
+    // this fork computes once at boot so the statusline never shows $0.00
+    // forever for users who never call open_ctx_stats.
+    expect(serverSrc).toContain("async function ensureLifetimeSnapshot");
+    expect(serverSrc).toContain("void ensureLifetimeSnapshot();");
+  });
+});
+
+// ─── Purge deleted array honesty ─────────────────────────────────────────────
+
+describe("open_ctx_purge deleted array is honest", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("every deleted.push in open_ctx_purge is guarded by a success check", () => {
+    // After the purgeSession() deep-module extraction, the per-file-kind
+    // success guards live in src/session/purge.ts. The handler itself only
+    // ever pushes "session stats" — which is the always-truthful in-memory
+    // reset and explicitly exempted from the guard rule. The deep module
+    // is independently covered by tests/session/purge-session.test.ts which
+    // proves each label appears only when at least one file was unlinked.
+    const purgeBody = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m)![0];
+    const pushes = [...purgeBody.matchAll(/deleted\.push\("([^"]+)"\)/g)];
+    for (const push of pushes) {
+      expect(push[1]).toBe("session stats");
+    }
+
+    // Issue #520: scoped per-session purge must NOT push "session stats"
+    // (stats are project-scoped). The push remains the only string-literal
+    // push, but it must be gated on scope === "project".
+    expect(purgeBody).toMatch(/scope\s*===\s*["']project["']/);
+
+    const moduleSrc = readFileSync(resolve(__dirname, "../../src/session/purge.ts"), "utf-8");
+    // Each user-facing label inside purgeSession() must be conditionally
+    // pushed (success check).  We grep every push and verify the 120 chars
+    // before it contain a guard.
+    const modulePushes = [...moduleSrc.matchAll(/deleted\.push\("([^"]+)"\)/g)];
+    expect(modulePushes.length).toBeGreaterThanOrEqual(2);
+    for (const push of modulePushes) {
+      const idx = push.index!;
+      const context = moduleSrc.slice(Math.max(0, idx - 160), idx);
+      const isGuarded =
+        /if\s*\(\s*\w*[Ff]ound/.test(context) || /if\s*\(\s*removed\s*\)/.test(context) || /if\s*\(\s*_store\s*\)/.test(context);
+      expect(isGuarded, `"${push[1]}" in purge.ts must be guarded by a success check`).toBe(true);
+    }
+  });
+});
+
+// ─── Issue #520: scoped open_ctx_purge handler/schema contract ──────────────────
+//
+// The HANDLER (not the deep module) owns the schema, the stats reset, and
+// the back-compat deprecation warning. The deep module stays pure and
+// is covered by tests/session/purge-session.test.ts. These tests assert
+// the additive contract WITHOUT booting the MCP server.
+
+describe("open_ctx_purge scoped handler (issue #520)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+  const purgeBody = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m)![0];
+
+  // Slice 4 — stats file & in-memory reset gated on scope === "project".
+  // A scoped per-session purge must leave the persisted stats file alone
+  // (other sessions in the project still own those bytes).
+  test("slice 4: persisted stats file unlink is gated on scope === 'project'", () => {
+    const statsBlockMatch = purgeBody.match(/getStatsFilePath\(\)[\s\S]{0,300}/);
+    expect(statsBlockMatch, "stats unlink block must exist in handler").not.toBeNull();
+    // The whole stats reset (in-memory + file unlink) must live under a
+    // `if (... === "project")` branch — verified by ensuring the stats
+    // unlink is NOT at the top level of the handler.
+    const statsIdx = purgeBody.indexOf("getStatsFilePath()");
+    const beforeStats = purgeBody.slice(0, statsIdx);
+    expect(beforeStats).toMatch(/scope\s*===\s*["']project["']/);
+  });
+
+  // Slice 5 — back-compat: bare {confirm:true} keeps verbatim behavior.
+  // The handler must map missing scope/sessionId → scope:"project" and
+  // delegate to purgeSession exactly as before. The schema must accept
+  // bare {confirm:true} as it always did.
+  test("slice 5: bare {confirm:true} handler still calls purgeSession with project scope", () => {
+    // Either explicit scope:"project" is passed, OR the deep module's
+    // own default-resolution kicks in. The handler MUST NOT throw on
+    // bare {confirm:true}.
+    expect(purgeBody).toMatch(/purgeSession\(/);
+    expect(purgeBody).not.toMatch(/throw new (?:Error|TypeError)\([^)]*sessionId/);
+  });
+
+  // Slice 6 — schema rejects {confirm, sessionId, scope:"project"} (ambiguous).
+  // The MCP SDK's normalizeObjectSchema() requires a plain ZodObject so it
+  // can read `.shape` when serializing inputSchema → JSON Schema for
+  // tools/list. A `.refine()` wrapper produces a ZodEffects which has no
+  // `.shape`, so the SDK falls back to `properties: {}` — and Claude Code's
+  // strict-input-validation gate then rejects the tool call before the
+  // handler ever runs. Issue #563.
+  //
+  // Therefore the cross-field check MUST live in the handler body, not on
+  // the schema. Verify (a) the inputSchema is NOT wrapped in refine() and
+  // (b) the handler still rejects the ambiguous combo at runtime.
+  test("slice 6: inputSchema is plain z.object — no .refine/.transform/.superRefine wrapper (#563)", () => {
+    // Locate the inputSchema literal (between `inputSchema:` and the next
+    // top-level handler comma `},`). Anchor narrowly so we only inspect
+    // the schema, not the handler body that legitimately contains checks.
+    const schemaStart = purgeBody.indexOf("inputSchema:");
+    expect(schemaStart).toBeGreaterThan(-1);
+    // The schema literal ends at the matching close of registerTool's
+    // options object — i.e. just before the def's `run:` body.
+    const handlerStart = purgeBody.indexOf("run: async");
+    expect(handlerStart).toBeGreaterThan(schemaStart);
+    const schemaSlice = purgeBody.slice(schemaStart, handlerStart);
+    expect(schemaSlice).not.toMatch(/\.refine\(/);
+    expect(schemaSlice).not.toMatch(/\.superRefine\(/);
+    expect(schemaSlice).not.toMatch(/\.transform\(/);
+  });
+
+  test("slice 6b: handler rejects ambiguous {sessionId + scope:'project'} at runtime (#563)", () => {
+    // The cross-field ambiguity check moved out of the schema into the
+    // handler body. Verify a guard exists that fires when sessionId is
+    // present AND scope === "project", and that it returns isError:true
+    // rather than throwing.
+    const handlerSlice = purgeBody.slice(purgeBody.indexOf("run: async"));
+    expect(handlerSlice).toMatch(/sessionId\s*&&\s*scope\s*===\s*["']project["']|scope\s*===\s*["']project["']\s*&&\s*sessionId/);
+    expect(handlerSlice).toMatch(/isError:\s*true/);
+    // Human-readable message preserved (matches the original refine() text
+    // so consumers see the same guidance).
+    expect(handlerSlice).toMatch(/[Aa]mbiguous/);
+  });
+
+  // Slice 7 — schema accepts {confirm:true, sessionId:"<uuid>"}.
+  test("slice 7: schema declares optional sessionId and scope", () => {
+    expect(purgeBody).toMatch(/sessionId:\s*z\s*[.]\s*string\s*[(]\s*[)]\s*[.]\s*optional\s*[(]\s*[)]/);
+    expect(purgeBody).toMatch(
+      /scope:\s*z\s*[.]\s*enum\s*[(]\s*\[\s*["']session["']\s*,\s*["']project["']\s*\]\s*[)]\s*[.]\s*optional\s*[(]\s*[)]/,
+    );
+  });
+
+  // Slice 8 — bare {confirm:true} (no sessionId, no scope) emits a
+  // deprecation warning to stderr exactly once. The warn lives in the
+  // handler — not the deep module — to keep purge.ts pure.
+  test("slice 8: handler emits deprecation warning when scope+sessionId both omitted", () => {
+    expect(purgeBody).toMatch(/console\.warn\([^)]*deprecat/i);
+  });
+
+  // Slice 9 (#563 regression — class-wide guard) — NO registered MCP tool
+  // may wrap its inputSchema in .refine(), .superRefine(), or .transform().
+  // All three produce a ZodEffects, which the MCP SDK's
+  // normalizeObjectSchema() does not recognize (it reads `.shape`), so the
+  // serialized JSON Schema collapses to `properties: {}` — and Claude Code
+  // (and any strict-input client) then refuses every call to that tool
+  // with "input_schema does not support fields". Move cross-field checks
+  // into the handler body. This test catches the entire class for ALL
+  // registered tools, not just open_ctx_purge.
+  test("slice 9: all registered MCP tools must have non-empty input schema (regression for #563)", () => {
+    // Match every registerTool(...) block — same anchor pattern used by
+    // the per-tool slices above. Greedy [\s\S]*? + line-anchored ^);
+    // terminator = the body of one registerTool call.
+    const blocks = [...serverSrc.matchAll(/registerCtxTool\(\s*"([^"]+)"[\s\S]*?^\);/gm)];
+    expect(blocks.length).toBeGreaterThan(5);
+
+    const violations: string[] = [];
+    for (const m of blocks) {
+      const name = m[1];
+      const body = m[0];
+      // Isolate just the inputSchema literal (between `inputSchema:` and
+      // the start of the handler arrow `async (`). Tools without an
+      // inputSchema (none currently) are skipped silently.
+      const sIdx = body.indexOf("inputSchema:");
+      if (sIdx < 0) continue;
+      const hIdx = body.indexOf("async (", sIdx);
+      const schemaSlice = hIdx > sIdx ? body.slice(sIdx, hIdx) : body.slice(sIdx);
+      if (/\.refine\(/.test(schemaSlice)) violations.push(`${name}: .refine()`);
+      if (/\.superRefine\(/.test(schemaSlice)) violations.push(`${name}: .superRefine()`);
+      if (/\.transform\(/.test(schemaSlice)) violations.push(`${name}: .transform()`);
+    }
+    expect(
+      violations,
+      "ZodEffects on inputSchema breaks MCP SDK normalizeObjectSchema → JSON " +
+        "Schema collapses to properties:{} → Claude Code rejects with " +
+        "'input_schema does not support fields'. Move cross-field checks into " +
+        "the handler body. See issue #563.",
+    ).toEqual([]);
+  });
+});
+
+// ─── KB purge behavioral (ContentStore) ─────────────────────────────────────
+
+describe("ContentStore purge behavior", () => {
+  test("cleanup() deletes DB files (including WAL and SHM)", () => {
+    const tmpPath = join(tmpdir(), `open_ctx-purge-test-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    store.index({
+      content: "test content for purge verification",
+      source: "purge-test",
+    });
+    expect(store.getStats().chunks).toBeGreaterThan(0);
+
+    store.cleanup();
+
+    // All DB files should be gone
+    expect(existsSync(tmpPath)).toBe(false);
+    expect(existsSync(tmpPath + "-wal")).toBe(false);
+    expect(existsSync(tmpPath + "-shm")).toBe(false);
+  });
+
+  test("index survives when cleanup is NOT called (--continue scenario)", () => {
+    const tmpPath = join(tmpdir(), `open_ctx-preserve-test-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    store.index({
+      content: "preserved content across sessions",
+      source: "preserve-test",
+    });
+    store.close();
+
+    // Simulate --continue: reopen same DB
+    const store2 = new ContentStore(tmpPath);
+    const stats = store2.getStats();
+    expect(stats.chunks).toBeGreaterThan(0);
+
+    const results = store2.search("preserved content", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    store2.cleanup();
+  });
+
+  test("store recovers after purge — new index works", () => {
+    const tmpPath = join(tmpdir(), `open_ctx-recovery-test-${Date.now()}.db`);
+
+    // Phase 1: index and purge
+    const store1 = new ContentStore(tmpPath);
+    store1.index({ content: "old content to be purged", source: "old" });
+    store1.cleanup();
+    expect(existsSync(tmpPath)).toBe(false);
+
+    // Phase 2: create fresh store at same path, index new content
+    const store2 = new ContentStore(tmpPath);
+    store2.index({ content: "fresh content after purge", source: "new" });
+
+    const results = store2.search("fresh content", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    // Old content should NOT be found
+    const oldResults = store2.search("old content to be purged", 5);
+    expect(oldResults.length).toBe(0);
+
+    store2.cleanup();
+  });
+
+  test("double cleanup does not crash", () => {
+    const tmpPath = join(tmpdir(), `open_ctx-double-purge-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+    store.index({ content: "some content", source: "test" });
+
+    // First cleanup
+    store.cleanup();
+    expect(existsSync(tmpPath)).toBe(false);
+
+    // Second cleanup — DB already gone, should not throw
+    expect(() => store.cleanup()).not.toThrow();
+  });
+
+  test("cleanup on never-indexed store does not crash", () => {
+    const tmpPath = join(tmpdir(), `open_ctx-empty-purge-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    // No indexing done — purge should still work
+    expect(() => store.cleanup()).not.toThrow();
+    expect(existsSync(tmpPath)).toBe(false);
+  });
+
+  test("open_ctx_purge handler deletes DB file even when _store is null (--continue scenario)", () => {
+    // After the purgeSession() extraction (src/session/purge.ts) the
+    // _store-is-null branch lives there: the handler ALWAYS resolves
+    // getStorePath() and passes it as `storePath`, regardless of whether
+    // _store was open.  purgeSession unlinks the file unconditionally,
+    // which is exactly the --continue scenario this test was created for.
+    // Behavioral coverage: tests/session/purge-session.test.ts slice 5.
+    const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+    const purgeBody = serverSrc.match(/registerCtxTool\(\s*"open_ctx_purge"[\s\S]*?^\);/m)![0];
+
+    // Handler resolves storePath BEFORE the optional store.cleanup() so
+    // the disk wipe runs whether _store was open or not.
+    const storePathIdx = purgeBody.indexOf("getStorePath()");
+    const storeCleanupIdx = purgeBody.indexOf("store.cleanup()");
+    expect(storePathIdx).toBeGreaterThan(-1);
+    expect(storePathIdx).toBeLessThan(storeCleanupIdx === -1 ? Infinity : storeCleanupIdx);
+    // Handler always passes storePath into the deep module — that is what
+    // makes the wipe unconditional.
+    expect(purgeBody).toContain("storePath: storePathForPurge");
+
+    // Deep module is the one calling unlinkSync on the FTS5 store path.
+    const moduleSrc = readFileSync(resolve(__dirname, "../../src/session/purge.ts"), "utf-8");
+    expect(moduleSrc).toContain("unlinkSync");
+  });
+});
+
+// ─── Version outdated warning ────────────────────────────────────────────────
+
+describe("Version outdated warning in trackResponse", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("fetchLatestVersion function exists and uses npm registry", () => {
+    expect(serverSrc).toContain("function fetchLatestVersion");
+    expect(serverSrc).toContain("registry.npmjs.org/open-context-mode");
+  });
+
+  test("version check fires in main() after server.connect", () => {
+    const mainFn = serverSrc.slice(serverSrc.indexOf("async function main"));
+    expect(mainFn).toContain("fetchLatestVersion");
+  });
+
+  test("trackResponse prepends warning when outdated", () => {
+    const trackFn = serverSrc.slice(serverSrc.indexOf("function trackResponse"), serverSrc.indexOf("function trackIndexed"));
+    expect(trackFn).toContain("_latestVersion");
+    expect(trackFn).toContain("outdated");
+  });
+
+  test("warning uses burst cadence (3 calls then silent)", () => {
+    expect(serverSrc).toContain("VERSION_BURST_SIZE");
+    expect(serverSrc).toContain("VERSION_SILENT_MS");
+    expect(serverSrc).toContain("_warningBurstCount");
+  });
+
+  test("getUpgradeHint returns the git-based fork update path", () => {
+    const start = serverSrc.indexOf("function getUpgradeHint");
+    expect(start).toBeGreaterThan(-1);
+    const returned = serverSrc.slice(start, start + 400).match(/return\s+([^;]+);/)?.[1] ?? "";
+    expect(returned).toContain("git pull && npm run build");
+    // Architectural lock: this fork is ahead of every published npm version,
+    // so an npm-based hint would tell users to downgrade over their own work.
+    expect(returned).not.toContain("npm update");
+    expect(returned).not.toContain("open_ctx-upgrade");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FS read instrumentation (mirrors network interceptor pattern)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("FS read instrumentation", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("wrapper contains __CM_FS__ marker for stderr reporting", () => {
+    expect(serverSrc).toContain("__CM_FS__:");
+  });
+
+  test("wrapper instruments readFileSync to count bytes", () => {
+    expect(serverSrc).toContain("readFileSync");
+    expect(serverSrc).toContain("__cm_fs+=");
+  });
+
+  test("wrapper instruments readFile (async) to count bytes", () => {
+    expect(serverSrc).toMatch(/readFile/);
+    expect(serverSrc).toContain("__cm_fs+=__cm_tb(d)");
+  });
+
+  test("parses __CM_FS__ from stderr and adds to bytesSandboxed", () => {
+    expect(serverSrc).toContain("__CM_FS__:(\\d+)");
+    expect(serverSrc).toContain("sessionStats.bytesSandboxed += parseInt(fsMatch[1])");
+  });
+
+  test("cleans __CM_FS__ marker from stderr output", () => {
+    expect(serverSrc).toContain('result.stderr.replace(/\\n?__CM_FS__:\\d+\\n?/g, "")');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// batch_execute FS read tracking via NODE_OPTIONS preload
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("batch_execute FS read tracking", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("creates CM_FS_PRELOAD temp file with FS tracking script", () => {
+    expect(serverSrc).toContain("CM_FS_PRELOAD");
+    expect(serverSrc).toContain("cm-fs-preload-");
+    // Preload script must write __CM_FS__ marker to stderr on exit
+    expect(serverSrc).toMatch(/writeFileSync\(\s*CM_FS_PRELOAD/);
+  });
+
+  test("sets NODE_OPTIONS with --require for batch commands", () => {
+    expect(serverSrc).toContain("buildBatchNodeOptionsPrefix");
+    expect(serverSrc).toContain("nodeOptsPrefix");
+  });
+
+  test("parses __CM_FS__ from batch output and updates bytesSandboxed", () => {
+    expect(serverSrc).toContain("/__CM_FS__:(\\d+)/g");
+    // Handler wires the FS-bytes callback to sessionStats; the runner strips/parses.
+    expect(serverSrc).toContain("sessionStats.bytesSandboxed += bytes");
+    expect(serverSrc).toContain("onFsBytes?.(cmdFsBytes)");
+  });
+
+  test("strips __CM_FS__ markers from batch command output", () => {
+    expect(serverSrc).toContain('output.replace(/__CM_FS__:\\d+\\n?/g, "")');
+  });
+
+  test("cleans up preload file on shutdown", () => {
+    expect(serverSrc).toContain("unlinkSync(CM_FS_PRELOAD)");
+  });
+
+  test("handler accepts concurrency input field with min/max bounds", () => {
+    expect(serverSrc).toContain("concurrency: z");
+    expect(serverSrc).toMatch(/\.min\(1\)\s*\n?\s*\.max\(8\)/);
+    expect(serverSrc).toContain(".default(1)");
+  });
+
+  test("tool description documents the concurrency field with positive guidance", () => {
+    // PR #683 / ADR-0002: emoji bullets replaced with prose. The standalone
+    // CONCURRENCY: section was folded into WHEN: / WHEN NOT: prose by the
+    // PR #683 WS3 canonical-structure pass so descriptions only carry the
+    // four canonical sections (WHEN / WHEN NOT / RETURNS / EXAMPLE) plus
+    // approved per-tool carve-outs (e.g. open_ctx_purge SCOPES / CONTRACT).
+    // The I/O-bound vs CPU-bound split and the 4-8 speedup window are still
+    // named — the PR #683 second amendment then deepened the concurrency
+    // guidance (CPU-bound stays at 1, GitHub API caps at 4 to respect rate
+    // limits, I/O-bound uses 4-8). This test pins the load-bearing concepts
+    // (I/O-bound parallelism, the 4-8 window, the keep-at-1 rule) not the
+    // exact prose so future copy-edits don't break it.
+    expect(serverSrc).toMatch(/parallelize I\/O-bound (work|calls|batches)/);
+    expect(serverSrc).toMatch(/4-8\s+(for I\/O-bound|I\/O-bound batches)/);
+    expect(serverSrc).toContain("CPU-bound or stateful");
+    expect(serverSrc).toContain("keep concurrency at 1");
+  });
+});
+
+import { buildJsInstrumentedCode, CM_FS_PRELOAD_SRC } from "../../src/server.js";
+import { createServer, type Server } from "node:http";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sandbox byte accounting must not count binary payloads (#1151)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("sandbox byte accounting skips binary payloads (#1151)", () => {
+  // 1200 bytes of text, and a PNG-like binary buffer full of NUL bytes.
+  const text = "hello world\n".repeat(100);
+  const bin = Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n", "latin1"), Buffer.alloc(4088)]);
+  let dir: string;
+  let textPath: string;
+  let binPath: string;
+  let server: Server;
+  let base: string;
+
+  const marker = (stderr: string, tag: "FS" | "NET"): number => Number(stderr.match(new RegExp(`__CM_${tag}__:(\\d+)`))?.[1] ?? 0);
+
+  const runNode = (args: string[]): Promise<string> =>
+    new Promise((res, rej) => {
+      const child = spawn(process.execPath, args, {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (c) => {
+        stderr += c;
+      });
+      child.on("error", rej);
+      child.on("close", () => res(stderr));
+    });
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "cm-1151-"));
+    textPath = join(dir, "a.txt");
+    binPath = join(dir, "a.png");
+    writeFileSync(textPath, text);
+    writeFileSync(binPath, bin);
+    server = createServer((req, res) => res.end(req.url === "/bin" ? bin : text));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address();
+    base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("open_ctx_execute wrapper counts text file reads, not binary ones", async () => {
+    const t = JSON.stringify(textPath);
+    const b = JSON.stringify(binPath);
+    const user = [
+      "const fs = require('fs');",
+      `fs.readFileSync(${b});`,
+      `fs.readFileSync(${t}, 'utf8');`,
+      `await new Promise((r) => fs.readFile(${b}, () => r()));`,
+    ].join("\n");
+    const stderr = await runNode(["-e", buildJsInstrumentedCode(user, false)]);
+    expect(marker(stderr, "FS")).toBe(Buffer.byteLength(text));
+  });
+
+  test("open_ctx_execute wrapper counts text responses, not binary ones (fetch + http)", async () => {
+    const user = [
+      "const http = require('http');",
+      `await (await fetch('${base}/bin')).arrayBuffer();`,
+      `await (await fetch('${base}/text')).text();`,
+      `await new Promise((r) => http.get('${base}/bin', (res) => { res.resume(); res.on('end', r); }));`,
+    ].join("\n");
+    const stderr = await runNode(["-e", buildJsInstrumentedCode(user, false)]);
+    expect(marker(stderr, "NET")).toBe(Buffer.byteLength(text));
+  });
+
+  test("open_ctx_batch_execute preload counts text file reads, not binary ones", async () => {
+    // Since #1068 the preload reports on a side file next to itself instead of
+    // stderr, so the out path has to be read from there (the pid in the name is
+    // arbitrary — the preload derives the path from its own filename).
+    const preload = join(dir, "cm-fs-preload-99999.js");
+    writeFileSync(preload, CM_FS_PRELOAD_SRC);
+    const code = `const fs=require('fs');fs.readFileSync(${JSON.stringify(binPath)});fs.readFileSync(${JSON.stringify(textPath)});`;
+    const stderr = await runNode(["--require", preload, "-e", code]);
+    expect(marker(stderr, "FS")).toBe(0);
+    const out = readFileSync(join(dir, "cm-fs-out-99999.txt"), "utf-8");
+    expect(marker(out, "FS")).toBe(Buffer.byteLength(text));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// runBatchCommands — concurrency, ordering, timeout semantics
+// ═══════════════════════════════════════════════════════════════════════════
+
+import {
+  buildBatchNodeOptionsPrefix,
+  ensureFsPreload,
+  runBatchCommands,
+  drainFsPreloadBytes,
+  CM_FS_OUT,
+  type BatchCommand,
+} from "../../src/server.js";
+
+interface MockResult {
+  stdout: string;
+  stderr?: string;
+  timedOut?: boolean;
+}
+
+function mkMockExecutor(
+  handler: (code: string, timeout: number | undefined, cwd: string | undefined) => Promise<MockResult> | MockResult,
+): {
+  execute: (input: { language: "shell"; code: string; timeout: number | undefined; cwd?: string }) => Promise<MockResult>;
+} {
+  return {
+    execute: async ({ code, timeout, cwd }) => Promise.resolve(handler(code, timeout, cwd)),
+  };
+}
+
+const NOOP_PREFIX = ""; // tests don't need NODE_OPTIONS prefix
+
+describe("runBatchCommands serial path (concurrency=1)", () => {
+  test("happy path: outputs in input order, no timeout cascade", async () => {
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "echo a" },
+      { label: "B", command: "echo b" },
+      { label: "C", command: "echo c" },
+    ];
+    const exec = mkMockExecutor((code) => ({
+      stdout: code.includes("echo a") ? "a" : code.includes("echo b") ? "b" : "c",
+    }));
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(timedOut).toBe(false);
+    expect(outputs).toHaveLength(3);
+    expect(outputs[0]).toContain("# A");
+    expect(outputs[0]).toContain("a");
+    expect(outputs[1]).toContain("# B");
+    expect(outputs[2]).toContain("# C");
+  });
+
+  test("preserves heredoc commands and combines captured stderr", async () => {
+    const heredoc = "node - <<'NODE'\nconsole.log('stdout')\nconsole.error('stderr')\nNODE";
+    let seenCode = "";
+    const exec = mkMockExecutor((code) => {
+      seenCode = code;
+      return { stdout: "stdout\n", stderr: "stderr\n" };
+    });
+    const { outputs, timedOut } = await runBatchCommands(
+      [{ label: "heredoc", command: heredoc }],
+      { timeout: 5000, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX },
+      exec,
+    );
+
+    expect(timedOut).toBe(false);
+    expect(seenCode).toBe(heredoc);
+    expect(seenCode).not.toContain("NODE 2>&1");
+    expect(outputs[0]).toContain("stdout");
+    expect(outputs[0]).toContain("stderr");
+  });
+
+  test("passes cwd override to serial shell executions (#756)", async () => {
+    const seenCwds: Array<string | undefined> = [];
+    const exec = mkMockExecutor((_code, _timeout, cwd) => {
+      seenCwds.push(cwd);
+      return { stdout: "ok" };
+    });
+
+    await runBatchCommands(
+      [{ label: "cwd", command: "pwd" }],
+      {
+        timeout: 5000,
+        concurrency: 1,
+        nodeOptsPrefix: NOOP_PREFIX,
+        cwd: "/worktree/repo",
+      },
+      exec,
+    );
+
+    expect(seenCwds).toEqual(["/worktree/repo"]);
+  });
+
+  test("forwards the MCP cancellation signal to serial shell executions (#959)", async () => {
+    const controller = new AbortController();
+    const seenSignals: Array<AbortSignal | undefined> = [];
+    const exec = {
+      execute: async ({ signal }: { signal?: AbortSignal }) => {
+        seenSignals.push(signal);
+        return { stdout: "ok" };
+      },
+    };
+
+    await runBatchCommands(
+      [{ label: "signal", command: "echo ok" }],
+      {
+        timeout: undefined,
+        concurrency: 1,
+        nodeOptsPrefix: NOOP_PREFIX,
+        signal: controller.signal,
+      },
+      exec,
+    );
+
+    expect(seenSignals).toEqual([controller.signal]);
+  });
+
+  test("cascading skip: timeout in first cmd skips the rest", async () => {
+    let callCount = 0;
+    const exec = mkMockExecutor(() => {
+      callCount++;
+      return { stdout: "slow", timedOut: true };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "slow", command: "sleep 999" },
+      { label: "next", command: "echo next" },
+      { label: "after", command: "echo after" },
+    ];
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 100, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(callCount).toBe(1); // only slow command executed
+    expect(timedOut).toBe(true);
+    expect(outputs[0]).toContain("# slow");
+    expect(outputs[1]).toContain("(skipped — batch timeout exceeded)");
+    expect(outputs[2]).toContain("(skipped — batch timeout exceeded)");
+  });
+
+  test("shared timeout budget: subsequent commands skip when budget exhausted", async () => {
+    let callCount = 0;
+    const exec = mkMockExecutor(async () => {
+      callCount++;
+      await new Promise((r) => setTimeout(r, 60)); // each call burns 60ms
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "x" },
+      { label: "C", command: "x" }, // by here, elapsed > 100ms
+    ];
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 100, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(callCount).toBeLessThan(3);
+    expect(timedOut).toBe(true);
+    expect(outputs.some((o) => o.includes("(skipped — batch timeout exceeded)"))).toBe(true);
+  });
+
+  // Issue #406 — when timeout omitted, no shared budget, no skip cascade.
+  test("no timeout: all commands run to completion, no skip", async () => {
+    const exec = mkMockExecutor(async () => {
+      // Each call burns 60ms. With timeout omitted, NONE should be skipped.
+      await new Promise((r) => setTimeout(r, 60));
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "x" },
+      { label: "C", command: "x" },
+    ];
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: undefined, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(timedOut).toBe(false);
+    expect(outputs).toHaveLength(3);
+    expect(outputs.every((o) => !o.includes("skipped"))).toBe(true);
+  });
+
+  test("no timeout: per-command timeout passed to executor is undefined", async () => {
+    const seenTimeouts: Array<number | undefined> = [];
+    const exec = {
+      execute: async (input: { language: "shell"; code: string; timeout: number | undefined }) => {
+        seenTimeouts.push(input.timeout);
+        return { stdout: "ok" } as MockResult;
+      },
+    };
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "y" },
+    ];
+    await runBatchCommands(cmds, { timeout: undefined, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(seenTimeouts).toEqual([undefined, undefined]);
+  });
+
+  // A budget that came only from HOST_DEFAULT_EXEC_TIMEOUT_MS is a per-command
+  // backstop against one hung command, not a deadline for the whole batch.
+  // Spending it across commands would silently truncate a long batch that
+  // nobody put a deadline on — the parallel path already treats it per-command.
+  test("host-default budget: applied per command, no shared-budget cascade", async () => {
+    const seenTimeouts: Array<number | undefined> = [];
+    const exec = mkMockExecutor(async (_code, timeout) => {
+      seenTimeouts.push(timeout);
+      await new Promise((r) => setTimeout(r, 60)); // each call burns 60ms
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "y" },
+      { label: "C", command: "z" }, // elapsed > 100ms by here
+    ];
+    const { outputs, timedOut } = await runBatchCommands(
+      cmds,
+      { timeout: 100, callerBudget: false, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX },
+      exec,
+    );
+    expect(seenTimeouts).toEqual([100, 100, 100]);
+    expect(timedOut).toBe(false);
+    expect(outputs.every((o) => !o.includes("skipped"))).toBe(true);
+  });
+
+  test("caller budget stays shared across commands (unchanged default)", async () => {
+    let callCount = 0;
+    const exec = mkMockExecutor(async () => {
+      callCount++;
+      await new Promise((r) => setTimeout(r, 60));
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "y" },
+      { label: "C", command: "z" },
+    ];
+    const { timedOut } = await runBatchCommands(
+      cmds,
+      { timeout: 100, callerBudget: true, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX },
+      exec,
+    );
+    expect(callCount).toBeLessThan(3);
+    expect(timedOut).toBe(true);
+  });
+});
+
+describe("runBatchCommands parallel path (concurrency>1)", () => {
+  test("happy path: 3 cmds at concurrency=3 finish in parallel", async () => {
+    const exec = mkMockExecutor(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "y" },
+      { label: "C", command: "z" },
+    ];
+    const start = Date.now();
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 3, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    const elapsed = Date.now() - start;
+    expect(timedOut).toBe(false);
+    expect(outputs).toHaveLength(3);
+    expect(elapsed).toBeLessThan(250); // 3x parallel ~100ms, with overhead room
+  });
+
+  test("parallel path preserves heredoc commands and combines captured stderr", async () => {
+    const seenCodes: string[] = [];
+    const exec = mkMockExecutor((code) => {
+      seenCodes.push(code);
+      return {
+        stdout: `${code.includes("one") ? "one" : "two"} stdout\n`,
+        stderr: `${code.includes("one") ? "one" : "two"} stderr\n`,
+      };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "ONE", command: "node - <<'NODE'\nconsole.log('one')\nNODE" },
+      { label: "TWO", command: "python3 - <<'PY'\nprint('two')\nPY" },
+    ];
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 2, nodeOptsPrefix: NOOP_PREFIX }, exec);
+
+    expect(timedOut).toBe(false);
+    expect(seenCodes).toEqual(cmds.map((cmd) => cmd.command));
+    expect(seenCodes.join("\n")).not.toContain("2>&1");
+    expect(outputs[0]).toContain("one stdout");
+    expect(outputs[0]).toContain("one stderr");
+    expect(outputs[1]).toContain("two stdout");
+    expect(outputs[1]).toContain("two stderr");
+  });
+
+  test("passes cwd override to parallel shell executions (#756)", async () => {
+    const seenCwds: Array<string | undefined> = [];
+    const exec = mkMockExecutor((_code, _timeout, cwd) => {
+      seenCwds.push(cwd);
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "pwd" },
+      { label: "B", command: "git branch --show-current" },
+    ];
+
+    await runBatchCommands(
+      cmds,
+      {
+        timeout: 5000,
+        concurrency: 2,
+        nodeOptsPrefix: NOOP_PREFIX,
+        cwd: "/worktree/repo",
+      },
+      exec,
+    );
+
+    expect(seenCwds).toEqual(["/worktree/repo", "/worktree/repo"]);
+  });
+
+  test("order preservation: outputs match input order, not completion order", async () => {
+    const exec = mkMockExecutor(async (code) => {
+      // Reverse-order delay: first cmd is slowest
+      const delay = code.includes("first") ? 80 : code.includes("second") ? 40 : 10;
+      await new Promise((r) => setTimeout(r, delay));
+      return { stdout: code.replace("echo ", "") };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "FIRST", command: "echo first" },
+      { label: "SECOND", command: "echo second" },
+      { label: "THIRD", command: "echo third" },
+    ];
+    const { outputs } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 3, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(outputs[0]).toContain("# FIRST");
+    expect(outputs[1]).toContain("# SECOND");
+    expect(outputs[2]).toContain("# THIRD");
+  });
+
+  test("concurrency cap: 6 cmds at concurrency=2 never exceed 2 in flight", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const exec = mkMockExecutor(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = Array.from({ length: 6 }, (_, i) => ({
+      label: `C${i}`,
+      command: "x",
+    }));
+    await runBatchCommands(cmds, { timeout: 5000, concurrency: 2, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    expect(maxInFlight).toBeGreaterThanOrEqual(2);
+  });
+
+  test("per-command timeout: one cmd times out, siblings continue", async () => {
+    const exec = mkMockExecutor((code) => {
+      if (code.includes("slow")) return { stdout: "", timedOut: true };
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "slow", command: "sleep slow" },
+      { label: "fast", command: "echo fast" },
+    ];
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 100, concurrency: 2, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(timedOut).toBe(true);
+    expect(outputs[0]).toContain("(timed out after 100ms)");
+    expect(outputs[1]).toContain("ok");
+  });
+
+  test("concurrency exceeds cmd count: caps at cmd count, no spurious workers", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const exec = mkMockExecutor(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "x" },
+      { label: "B", command: "y" },
+    ];
+    await runBatchCommands(cmds, { timeout: 5000, concurrency: 8, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
+  test("FS bytes callback fires per-command in parallel branch", async () => {
+    const exec = mkMockExecutor((code) => ({
+      stdout: code.includes("a") ? "out a\n__CM_FS__:100\n" : "out b\n__CM_FS__:200\n",
+    }));
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "echo a" },
+      { label: "B", command: "echo b" },
+    ];
+    let totalBytes = 0;
+    const { outputs } = await runBatchCommands(
+      cmds,
+      {
+        timeout: 5000,
+        concurrency: 2,
+        nodeOptsPrefix: NOOP_PREFIX,
+        onFsBytes: (b) => {
+          totalBytes += b;
+        },
+      },
+      exec,
+    );
+    expect(totalBytes).toBe(300);
+    // markers stripped from output
+    expect(outputs.join("")).not.toContain("__CM_FS__");
+  });
+});
+
+describe("runBatchCommands edge cases", () => {
+  test("empty commands array returns empty outputs", async () => {
+    const exec = mkMockExecutor(() => ({ stdout: "" }));
+    const { outputs, timedOut } = await runBatchCommands([], { timeout: 1000, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(outputs).toHaveLength(0);
+    expect(timedOut).toBe(false);
+  });
+
+  test("empty stdout becomes (no output) sentinel", async () => {
+    const exec = mkMockExecutor(() => ({ stdout: "" }));
+    const cmds: BatchCommand[] = [{ label: "A", command: "x" }];
+    const { outputs } = await runBatchCommands(cmds, { timeout: 1000, concurrency: 1, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(outputs[0]).toContain("(no output)");
+  });
+
+  test("nodeOptsPrefix is prepended to each command", async () => {
+    const seen: string[] = [];
+    const exec = mkMockExecutor((code) => {
+      seen.push(code);
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = [{ label: "A", command: "echo hi" }];
+    await runBatchCommands(
+      cmds,
+      {
+        timeout: 1000,
+        concurrency: 1,
+        nodeOptsPrefix: 'NODE_OPTIONS="--require /tmp/x" ',
+      },
+      exec,
+    );
+    expect(seen[0]).toBe('NODE_OPTIONS="--require /tmp/x" echo hi');
+  });
+
+  test("buildBatchNodeOptionsPrefix formats POSIX shell assignment", () => {
+    const prefix = buildBatchNodeOptionsPrefix("bash", "/tmp/cm fs'preload.js");
+    expect(prefix).toBe("export NODE_OPTIONS='--require /tmp/cm fs'\\''preload.js'; ");
+  });
+
+  // #1117: an inline `NODE_OPTIONS=… cmd` prefix is a bash syntax error before
+  // compound commands and never reaches later commands in a chain.
+  test.skipIf(process.platform === "win32")("POSIX prefix keeps compound commands valid and reaches every command in a chain", () => {
+    const prefix = buildBatchNodeOptionsPrefix("bash", "/tmp/cm-fs-preload.js");
+    const run = (cmd: string) =>
+      execFileSync("bash", ["-c", prefix + cmd], {
+        encoding: "utf8",
+        env: { ...process.env, NODE_OPTIONS: "" },
+      }).trim();
+
+    expect(run("for p in a b; do printf %s $p; done")).toBe("ab");
+    expect(run("while false; do :; done; echo ok")).toBe("ok");
+    expect(run("if true; then echo yes; fi")).toBe("yes");
+    expect(run("{ echo grouped; }")).toBe("grouped");
+    expect(run('true && echo "$NODE_OPTIONS"')).toBe("--require /tmp/cm-fs-preload.js");
+    expect(run("echo x | sh -c 'echo \"$NODE_OPTIONS\"'")).toBe("--require /tmp/cm-fs-preload.js");
+  });
+
+  test("buildBatchNodeOptionsPrefix formats PowerShell assignment", () => {
+    const prefix = buildBatchNodeOptionsPrefix("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "C:\\Temp\\cm ' fs.js");
+    expect(prefix).toBe("$env:NODE_OPTIONS='--require C:\\Temp\\cm '' fs.js'; ");
+  });
+
+  test("buildBatchNodeOptionsPrefix formats cmd assignment", () => {
+    const prefix = buildBatchNodeOptionsPrefix("C:\\Windows\\System32\\cmd.exe", "C:\\Temp\\cm-fs-preload.js");
+    expect(prefix).toBe('set "NODE_OPTIONS=--require C:\\Temp\\cm-fs-preload.js" && ');
+  });
+
+  // #951 — OS temp cleaners can remove the preload file while the server is
+  // still alive; injection must re-create it rather than point node children
+  // at a missing --require target.
+  test("ensureFsPreload re-creates the preload file after external deletion (#951)", () => {
+    const p = ensureFsPreload();
+    expect(existsSync(p)).toBe(true);
+
+    unlinkSync(p);
+    expect(existsSync(p)).toBe(false);
+
+    const p2 = ensureFsPreload();
+    expect(p2).toBe(p);
+    expect(existsSync(p)).toBe(true);
+    // Restored file must be the real tracker, not an empty placeholder.
+    expect(readFileSync(p, "utf-8")).toContain("__CM_FS__");
+  });
+
+  // #1068 — NODE_OPTIONS is inherited by every descendant, so the preload's
+  // stderr marker written by a grandchild landed in the very stream the
+  // measured program was asserting on (any suite with "stderr must be empty"
+  // on a spawned CLI). The side channel fixes both halves at once: no process's
+  // stderr is touched, and the descendant tree's bytes are counted instead of
+  // being lost in whatever stream an intermediate process swallowed.
+  describe("#1068: the fs-read counter reports on a side file, not stderr", () => {
+    let dir: string;
+    let target: string;
+    let parent: string;
+    let grandchild: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "cm-fs-1068-"));
+      target = join(dir, "target.txt");
+      writeFileSync(target, "z".repeat(4096), "utf-8");
+      grandchild = join(dir, "grandchild.cjs");
+      writeFileSync(grandchild, `require("fs").readFileSync(${JSON.stringify(target)}, "utf-8");\n`, "utf-8");
+      parent = join(dir, "parent.cjs");
+      // The child spawns a grandchild and fails loudly if its stderr is not
+      // empty — the exact shape that went red in seven CLI-shim suites.
+      writeFileSync(
+        parent,
+        [
+          `const { spawnSync } = require("child_process");`,
+          `require("fs").readFileSync(${JSON.stringify(target)}, "utf-8");`,
+          `const r = spawnSync(process.execPath, [${JSON.stringify(grandchild)}], { encoding: "utf-8" });`,
+          `if (r.status !== 0) { process.stderr.write(String(r.stderr)); process.exit(1); }`,
+          `if (r.stderr !== "") { process.stderr.write("GRANDCHILD STDERR NOT EMPTY: " + JSON.stringify(r.stderr)); process.exit(2); }`,
+          `process.stdout.write("ok\\n");`,
+        ].join("\n"),
+        "utf-8",
+      );
+      try {
+        unlinkSync(CM_FS_OUT);
+      } catch {}
+    });
+
+    afterEach(() => {
+      try {
+        unlinkSync(CM_FS_OUT);
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test.skipIf(process.platform === "win32")("a grandchild's marker never reaches the stream it is measured on", () => {
+      const prefix = buildBatchNodeOptionsPrefix("/bin/bash", ensureFsPreload());
+      const r = spawnSync("/bin/bash", ["-c", `${prefix}${JSON.stringify(process.execPath)} ${JSON.stringify(parent)}`], {
+        encoding: "utf-8",
+        env: { ...process.env, NODE_OPTIONS: "" },
+      });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain("ok");
+      expect(`${r.stdout}${r.stderr}`).not.toContain("__CM_FS__");
+    });
+
+    test.skipIf(process.platform === "win32")("the side file counts the whole descendant tree, then drains to zero", () => {
+      const prefix = buildBatchNodeOptionsPrefix("/bin/bash", ensureFsPreload());
+      const r = spawnSync("/bin/bash", ["-c", `${prefix}${JSON.stringify(process.execPath)} ${JSON.stringify(parent)}`], {
+        encoding: "utf-8",
+        env: { ...process.env, NODE_OPTIONS: "" },
+      });
+      expect(r.status).toBe(0);
+      // At least two reporters: the direct child AND the grandchild, which is
+      // the part that used to be lost in whatever stream its parent captured.
+      const markers = [...readFileSync(CM_FS_OUT, "utf-8").matchAll(/__CM_FS__:(\d+)/g)];
+      expect(markers.length).toBeGreaterThanOrEqual(2);
+      // …and the total covers both 4096-byte reads (plus the loader's own).
+      expect(drainFsPreloadBytes()).toBeGreaterThanOrEqual(8192);
+      // Drained: the next batch must not re-count these bytes.
+      expect(drainFsPreloadBytes()).toBe(0);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// runBatchCommands hardening — P0 fixes per PRD-concurrency-architectural §0
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("runBatchCommands P0 hardening", () => {
+  test("finding A: executor throw is isolated, siblings complete", async () => {
+    // One worker's executor.execute() throws (e.g. spawn EAGAIN under load).
+    // Without try/catch, Promise.all would reject and strand sibling outputs
+    // as `undefined`, surfacing as the literal "undefined" after .join("\n").
+    const exec = mkMockExecutor((code) => {
+      if (code.includes("boom")) throw new Error("spawn EAGAIN");
+      return {
+        stdout: code.includes("a") ? "alpha" : code.includes("b") ? "beta" : "gamma",
+      };
+    });
+    const cmds: BatchCommand[] = [
+      { label: "A", command: "echo a" },
+      { label: "BOOM", command: "echo boom" },
+      { label: "B", command: "echo b" },
+      { label: "C", command: "echo c" },
+    ];
+    const { outputs } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 4, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    expect(outputs).toHaveLength(4);
+    expect(outputs[0]).toContain("# A");
+    expect(outputs[0]).toContain("alpha");
+    expect(outputs[1]).toContain("# BOOM");
+    expect(outputs[1]).toContain("(executor error: spawn EAGAIN)");
+    expect(outputs[2]).toContain("beta");
+    expect(outputs[3]).toContain("gamma");
+    // Critically: no `undefined` slots
+    expect(outputs.every((o) => typeof o === "string" && o.length > 0)).toBe(true);
+  });
+
+  test("finding B: timed-out parallel command still strips __CM_FS__ markers + counts bytes", async () => {
+    // Real subprocess timeouts often return partial stdout *with* the marker.
+    // Pre-fix the parallel branch wrote the (timed out) sentinel directly,
+    // bypassing formatCommandOutput → markers leaked into context, bytes uncounted.
+    const exec = mkMockExecutor(() => ({
+      stdout: "partial line 1\n__CM_FS__:512\npartial line 2\n",
+      timedOut: true,
+    }));
+    let totalBytes = 0;
+    const { outputs, timedOut } = await runBatchCommands(
+      [{ label: "SLOW", command: "x" }],
+      {
+        timeout: 100,
+        concurrency: 2,
+        nodeOptsPrefix: NOOP_PREFIX,
+        onFsBytes: (b) => {
+          totalBytes += b;
+        },
+      },
+      exec,
+    );
+    expect(timedOut).toBe(true);
+    expect(totalBytes).toBe(512); // marker counted
+    expect(outputs[0]).not.toContain("__CM_FS__"); // marker stripped
+    expect(outputs[0]).toContain("partial line 1");
+    expect(outputs[0]).toContain("partial line 2");
+    expect(outputs[0]).toContain("(timed out after 100ms)"); // sentinel still appended
+  });
+
+  test("finding D: timing-regression — 5 cmds × 100ms at concurrency=5 finishes in <200ms", async () => {
+    // Replaces the deleted bench (CONTRIBUTING.md L275 forbids new test files).
+    // Asserts ≥3× speedup over serial. CI-checked.
+    const exec = mkMockExecutor(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+      return { stdout: "ok" };
+    });
+    const cmds: BatchCommand[] = Array.from({ length: 5 }, (_, i) => ({
+      label: `C${i}`,
+      command: "x",
+    }));
+    const start = Date.now();
+    const { outputs, timedOut } = await runBatchCommands(cmds, { timeout: 5000, concurrency: 5, nodeOptsPrefix: NOOP_PREFIX }, exec);
+    const elapsed = Date.now() - start;
+    expect(timedOut).toBe(false);
+    expect(outputs).toHaveLength(5);
+    // Serial would be ~500ms (5×100). Parallel should be ~100ms + overhead.
+    // Threshold 200ms gives generous CI room while still catching a regression to serial.
+    expect(elapsed).toBeLessThan(200);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// runPool — shared concurrency primitive (PRD finding G)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { runPool, type PoolJob } from "../../src/runPool.js";
+
+describe("runPool primitive", () => {
+  test("empty jobs returns empty settled array", async () => {
+    const { settled, effectiveConcurrency, capped } = await runPool([], {
+      concurrency: 4,
+    });
+    expect(settled).toHaveLength(0);
+    expect(effectiveConcurrency).toBe(0);
+    expect(capped).toBe(false);
+  });
+
+  test("happy path: order preserved, all fulfilled", async () => {
+    const jobs: PoolJob<number>[] = [10, 20, 30, 40].map((v, i) => ({
+      run: async () => {
+        await new Promise((r) => setTimeout(r, (4 - i) * 10)); // reverse-order delay
+        return v;
+      },
+    }));
+    const { settled, effectiveConcurrency } = await runPool(jobs, {
+      concurrency: 4,
+    });
+    expect(effectiveConcurrency).toBe(4);
+    expect(settled.map((s) => (s.status === "fulfilled" ? s.value : null))).toEqual([10, 20, 30, 40]);
+  });
+
+  test("throw isolation: one job rejects, siblings still fulfill", async () => {
+    const jobs: PoolJob<string>[] = [
+      { run: async () => "a" },
+      {
+        run: async () => {
+          throw new Error("boom");
+        },
+      },
+      { run: async () => "c" },
+    ];
+    const { settled } = await runPool(jobs, { concurrency: 3 });
+    expect(settled[0]).toEqual({ status: "fulfilled", value: "a" });
+    expect(settled[1].status).toBe("rejected");
+    expect((settled[1] as { reason: Error }).reason.message).toBe("boom");
+    expect(settled[2]).toEqual({ status: "fulfilled", value: "c" });
+  });
+
+  test("in-flight cap: never exceeds concurrency", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const jobs: PoolJob<void>[] = Array.from({ length: 10 }, () => ({
+      run: async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 20));
+        inFlight--;
+      },
+    }));
+    const { effectiveConcurrency, capped } = await runPool(jobs, {
+      concurrency: 3,
+    });
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBeGreaterThanOrEqual(2); // proves at least some parallelism
+    expect(effectiveConcurrency).toBe(3);
+    expect(capped).toBe(false);
+  });
+
+  test("auto-clamp to job count when concurrency > jobs.length is not a cap", async () => {
+    const jobs: PoolJob<number>[] = [{ run: async () => 1 }, { run: async () => 2 }];
+    const { effectiveConcurrency, capped } = await runPool(jobs, {
+      concurrency: 8,
+    });
+    expect(effectiveConcurrency).toBe(2);
+    // A pool larger than its workload is not a CPU/explicit cap (#915).
+    expect(capped).toBe(false);
+  });
+
+  test("capByCpuCount caps by os.cpus().length", async () => {
+    // We can't predict the test runner's cpu count, so just assert the bounds.
+    const jobs: PoolJob<number>[] = Array.from({ length: 32 }, (_, i) => ({
+      run: async () => i,
+    }));
+    const { effectiveConcurrency, capped } = await runPool(jobs, {
+      concurrency: 32,
+      capByCpuCount: true,
+    });
+    const cores = require("node:os").cpus().length;
+    expect(effectiveConcurrency).toBeLessThanOrEqual(cores);
+    expect(effectiveConcurrency).toBeLessThanOrEqual(32);
+    expect(capped).toBe(effectiveConcurrency < 32);
+  });
+
+  test("onSettled callback fires per job in completion order", async () => {
+    const events: number[] = [];
+    const jobs: PoolJob<number>[] = [
+      {
+        run: async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          return 0;
+        },
+      },
+      {
+        run: async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          return 1;
+        },
+      },
+      {
+        run: async () => {
+          await new Promise((r) => setTimeout(r, 20));
+          return 2;
+        },
+      },
+    ];
+    await runPool(jobs, {
+      concurrency: 3,
+      onSettled: (idx) => {
+        events.push(idx);
+      },
+    });
+    // Job 1 (10ms) completes first, then 2 (20ms), then 0 (30ms)
+    expect(events).toEqual([1, 2, 0]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_fetch_and_index batch path — schema + handler-level checks
+// (Full subprocess fetch tested in tests/mcp-integration.ts;
+//  these tests verify schema acceptance + serial-index contract via source-level read.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("open_ctx_fetch_and_index batch refactor", () => {
+  const fetchHandlerSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("schema accepts both legacy {url} and batch {requests}", () => {
+    expect(fetchHandlerSrc).toContain("url: z.string().optional()");
+    expect(fetchHandlerSrc).toContain("requests: z");
+    // Zod array of {url, source?} wrapped with preprocess for native plugin coercion
+    expect(fetchHandlerSrc).toContain("z.preprocess(");
+    expect(fetchHandlerSrc).toContain("coerceJsonArray");
+    expect(fetchHandlerSrc).toContain("url: z.string()");
+    expect(fetchHandlerSrc).toContain("source: z.string().optional()");
+  });
+
+  test("handler exposes concurrency 1-8 with default 1", () => {
+    // Find the fetch_and_index registerTool block, then assert concurrency schema near it.
+    // Stop anchor: the next registerTool call (open_ctx_batch_execute).
+    const fetchBlockMatch = fetchHandlerSrc.match(
+      /registerCtxTool\(\s*"open_ctx_fetch_and_index"[\s\S]+?registerCtxTool\(\s*"open_ctx_batch_execute"/,
+    );
+    expect(fetchBlockMatch).not.toBeNull();
+    const block = fetchBlockMatch![0];
+    expect(block).toContain("concurrency: z");
+    expect(block).toMatch(/\.min\(1\)\s*\n?\s*\.max\(8\)/);
+    expect(block).toContain(".default(1)");
+  });
+
+  test("handler exposes per-call ttl override for fetch cache freshness (#648)", () => {
+    const fetchBlockMatch = fetchHandlerSrc.match(
+      /registerCtxTool\(\s*"open_ctx_fetch_and_index"[\s\S]+?registerCtxTool\(\s*"open_ctx_batch_execute"/,
+    );
+    expect(fetchBlockMatch).not.toBeNull();
+    const block = fetchBlockMatch![0];
+    expect(block).toContain("ttl: z");
+    expect(block).toContain("Override the cache freshness window");
+    expect(block).toContain("`ttl: 0` bypasses the cache like `force: true`");
+    expect(block).toContain("const { url, source, requests, concurrency, force, ttl } = rawArgs as {");
+    expect(block).toContain("fetchOneUrl(req.url, req.source, force, ttl)");
+  });
+
+  test("fetchOneUrl applies ttl override and treats ttl=0 as cache bypass (#648)", () => {
+    const fetchOneSrc = fetchHandlerSrc.match(/async function fetchOneUrl\([\s\S]+?const outputPath =/m);
+    expect(fetchOneSrc).not.toBeNull();
+    const block = fetchOneSrc![0];
+    expect(block).toContain("ttl: number | undefined");
+    expect(block).toContain("if (!force && ttl !== 0)");
+    expect(block).toContain("const cacheTtlMs = ttl ?? FETCH_TTL_MS");
+    expect(block).toContain("ageMs < cacheTtlMs");
+    expect(block).toContain("ttlStr: formatFetchTtl(cacheTtlMs)");
+  });
+
+  test("PARALLELIZE I/O guidance + locked requests:[] schema in description", () => {
+    // PR #683 / ADR-0002: emoji bullets replaced with prose. PR #683 WS3
+    // (canonical structure) folded the dedicated CONCURRENCY: section into
+    // the WHEN: / RETURNS: prose so the description carries only the
+    // canonical four sections (WHEN / WHEN NOT / RETURNS / EXAMPLE).
+    // PR #683 second amendment then deepened the concurrency guidance
+    // (gh API cap 4, single-writer mechanism explanation) and reframed the
+    // FTS5 serialization in more technical terms ("write phase always runs
+    // serially because SQLite is a single-writer store").
+    // This test pins the load-bearing concepts (requests:[] batch shape,
+    // 4-8 I/O window, FTS5 serial-write contract) using semantic regexes
+    // so future copy-edits don't break it.
+    expect(fetchHandlerSrc).toMatch(/requests(:\s*\[|`\s*array)/);
+    expect(fetchHandlerSrc).toMatch(/4-8\s+(for|stable)/);
+    expect(fetchHandlerSrc).toMatch(/FTS5[^.]*(serializes? writes?|write phase[^.]*serial|single-writer)/);
+  });
+
+  test("serial-write contract: index drain is a for-loop calling indexFetched serially", () => {
+    // The handler must NOT spawn parallel store.index calls. The drain is a
+    // for-loop over `settled` calling indexFetched serially. Anti-pattern check.
+    expect(fetchHandlerSrc).toContain("Serial index drain");
+    expect(fetchHandlerSrc).toContain("indexFetched(v)");
+    // No `await Promise.all(... indexFetched ...)` pattern anywhere
+    expect(fetchHandlerSrc).not.toMatch(/Promise\.all\([^)]*indexFetched/);
+  });
+
+  test("backward compat: legacy single-URL response wording preserved", () => {
+    // Original handler returned "Cached: **${label}**" / "Fetched and indexed **N sections**"
+    // The refactor must keep these EXACT strings for the legacy path so
+    // tests/mcp-integration.ts and any user-side scripts grepping the response don't break.
+    expect(fetchHandlerSrc).toContain("Cached: **${r.label}**");
+    expect(fetchHandlerSrc).toContain("Fetched and indexed **${r.indexed.totalChunks} sections**");
+    // The source escapes backticks inside a template literal — match the escaped form.
+    expect(fetchHandlerSrc).toContain("To refresh: call open_ctx_fetch_and_index again with");
+    expect(fetchHandlerSrc).toContain("force: true");
+  });
+
+  test("isLegacySingle gate prevents batch response wrapping for single-URL calls", () => {
+    expect(fetchHandlerSrc).toContain("const isLegacySingle = !requests && batch.length === 1");
+    expect(fetchHandlerSrc).toContain("if (isLegacySingle)");
+  });
+
+  test("capped-concurrency note appears only when capped", () => {
+    expect(fetchHandlerSrc).toMatch(/cappedNote\s*=\s*capped\s*\?/);
+    // Compact form `cap=N/Mcpu` (replaces verbose "capped from N to M; M cores available").
+    expect(fetchHandlerSrc).toContain("cap=${effectiveConcurrency}/${cpus().length}cpu");
+  });
+
+  test("batch isError only when ALL URLs fail (errorCount === batch.length)", () => {
+    expect(fetchHandlerSrc).toContain("isError: errorCount === batch.length");
+  });
+
+  test("batch preview is capped to prevent context flooding (review F2)", () => {
+    // Per-URL preview in batch mode capped tightly so an 8-URL batch doesn't
+    // dump ~24KB of context (8 × 3072 char single-URL preview cap).
+    expect(fetchHandlerSrc).toContain("FETCH_BATCH_PREVIEW_LIMIT");
+    // Cap value must be ≤500 chars (8 URLs × 500 = ~4KB max snippets total)
+    const limitMatch = fetchHandlerSrc.match(/FETCH_BATCH_PREVIEW_LIMIT\s*=\s*(\d+)/);
+    expect(limitMatch).not.toBeNull();
+    expect(parseInt(limitMatch![1])).toBeLessThanOrEqual(500);
+    // Must actually be applied to per-URL previews in the batch loop
+    expect(fetchHandlerSrc).toMatch(/preview\.length\s*>\s*FETCH_BATCH_PREVIEW_LIMIT/);
+  });
+
+  test("batch header uses singular form for count=1 (review F5 plural fix)", () => {
+    // Grammar correctness in the compact status line: "1 errors" → "1 error"
+    // via the fmt() helper, so the line stays grammatical at any count.
+    expect(fetchHandlerSrc).toContain("const fmt = (n: number, sing: string, plur: string)");
+    expect(fetchHandlerSrc).toContain("n === 1 ? sing : plur");
+  });
+
+  test("batch header uses compact format (review F5)", () => {
+    // Old: "Batch fetched N URLs at concurrency=X (capped from Y to X; Z cores available): a fetched, b cached, c errors. d new sections (eKB total)."
+    // New: "fetched N c=X cap=X/Zcpu. ok=a cache=b err=c. d sections eKB."
+    expect(fetchHandlerSrc).toContain("`fetched ${batch.length} c=${effectiveConcurrency}");
+    expect(fetchHandlerSrc).toContain("ok=${fetchedCount} cache=${cachedCount} err=${errorCount}");
+    expect(fetchHandlerSrc).not.toContain("Batch fetched"); // old verbose wording gone
+  });
+
+  test("fetchOneUrl is parallel-safe (no SQLite writes)", () => {
+    // Verify by inspecting the helper source: it calls store.getSourceMeta (read)
+    // but never store.index/indexJSON/indexPlainText (writes).
+    const fetchOneSrc = fetchHandlerSrc.match(/async function fetchOneUrl\([\s\S]+?^}/m);
+    expect(fetchOneSrc).not.toBeNull();
+    const block = fetchOneSrc![0];
+    expect(block).toContain("store.getSourceMeta"); // read OK
+    expect(block).not.toContain("store.index"); // no writes
+    expect(block).not.toContain("store.indexJSON");
+    expect(block).not.toContain("store.indexPlainText");
+  });
+
+  test("indexFetched is serial-only (single FTS5 write per call)", () => {
+    const indexFetchedSrc = fetchHandlerSrc.match(/function indexFetched\([\s\S]+?^}/m);
+    expect(indexFetchedSrc).not.toBeNull();
+    const block = indexFetchedSrc![0];
+    // Has exactly one of: store.index / store.indexJSON / store.indexPlainText per branch
+    expect(block).toContain("store.indexJSON");
+    expect(block).toContain("store.indexPlainText");
+    expect(block).toContain("store.index");
+  });
+
+  test("force and requests parameters coerce string types from in-process native plugins", () => {
+    // OpenCode/Kilo in-process plugin bridge stringifies primitive types
+    // (boolean → "false", array → "[]"). z.preprocess(coerceBoolean/coerceJsonArray)
+    // defends against this in the Zod parse step. This test verifies those
+    // preprocess wrappers are present (issue #627 follow-up).
+    const fetchBlockMatch = fetchHandlerSrc.match(
+      /registerCtxTool\(\s*"open_ctx_fetch_and_index"[\s\S]+?registerCtxTool\(\s*"open_ctx_batch_execute"/,
+    );
+    expect(fetchBlockMatch).not.toBeNull();
+    const block = fetchBlockMatch![0];
+    // force must coerce "false"/"true" strings → boolean
+    expect(block).toMatch(/force:\s*z\s*\n?\s*\.preprocess\(\s*coerceBoolean\s*,\s*z\.boolean\(\)\)/);
+    // requests must coerce JSON-stringified arrays
+    expect(block).toMatch(/requests:\s*z\s*\n?\s*\.preprocess\(\s*coerceJsonArray\s*,/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSRF guard — open_ctx_fetch_and_index URL/IP allowlist (PR #401 ops review)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { classifyIp } from "../../src/server.js";
+
+describe("classifyIp — SSRF guard IP classifier", () => {
+  test("hard-blocks IMDS / link-local IPv4 (169.254.0.0/16)", () => {
+    // 169.254.169.254 = AWS/GCP/Azure cloud metadata endpoint — never legitimate
+    expect(classifyIp("169.254.169.254")).toBe("block");
+    expect(classifyIp("169.254.0.1")).toBe("block");
+    expect(classifyIp("169.254.255.254")).toBe("block");
+  });
+
+  test("hard-blocks multicast / reserved IPv4 (224+ and 0.0.0.0/8)", () => {
+    expect(classifyIp("224.0.0.1")).toBe("block");
+    expect(classifyIp("239.255.255.255")).toBe("block");
+    expect(classifyIp("255.255.255.255")).toBe("block");
+    expect(classifyIp("0.0.0.0")).toBe("block");
+    expect(classifyIp("0.1.2.3")).toBe("block");
+  });
+
+  test("hard-blocks malformed IPv4", () => {
+    expect(classifyIp("999.999.999.999")).toBe("block");
+    expect(classifyIp("not-an-ip")).toBe("block");
+    expect(classifyIp("1.2.3")).toBe("block");
+  });
+
+  test("hard-blocks IPv6 link-local + multicast + unspecified", () => {
+    expect(classifyIp("fe80::1")).toBe("block"); // link-local
+    expect(classifyIp("ff00::1")).toBe("block"); // multicast
+    expect(classifyIp("::")).toBe("block"); // unspecified
+  });
+
+  test("private (allow by default, block under strict mode): RFC1918 + loopback IPv4", () => {
+    // Allowed by default — developer's local dev server / internal network
+    expect(classifyIp("127.0.0.1")).toBe("private");
+    expect(classifyIp("127.255.255.255")).toBe("private");
+    expect(classifyIp("10.0.0.5")).toBe("private");
+    expect(classifyIp("10.255.255.255")).toBe("private");
+    expect(classifyIp("172.16.0.1")).toBe("private");
+    expect(classifyIp("172.31.255.255")).toBe("private");
+    expect(classifyIp("172.15.0.1")).toBe("public"); // outside RFC1918
+    expect(classifyIp("172.32.0.1")).toBe("public"); // outside RFC1918
+    expect(classifyIp("192.168.1.1")).toBe("private");
+    expect(classifyIp("192.168.255.255")).toBe("private");
+  });
+
+  test("private: IPv6 loopback + ULA (fc00::/7)", () => {
+    expect(classifyIp("::1")).toBe("private");
+    expect(classifyIp("fc00::1")).toBe("private");
+    expect(classifyIp("fd12:3456:789a::1")).toBe("private");
+  });
+
+  test("public: real internet IPs", () => {
+    expect(classifyIp("8.8.8.8")).toBe("public"); // Google DNS
+    expect(classifyIp("1.1.1.1")).toBe("public"); // Cloudflare DNS
+    expect(classifyIp("140.82.121.4")).toBe("public"); // github.com
+    expect(classifyIp("2001:4860:4860::8888")).toBe("public"); // Google DNS IPv6
+  });
+
+  test("IPv4-mapped IPv6 recurses through IPv4 classifier", () => {
+    // ::ffff:127.0.0.1 is just 127.0.0.1 wrapped in IPv6 mapping
+    expect(classifyIp("::ffff:127.0.0.1")).toBe("private");
+    expect(classifyIp("::ffff:169.254.169.254")).toBe("block"); // IMDS via IPv4-mapped
+    expect(classifyIp("::ffff:8.8.8.8")).toBe("public");
+  });
+});
+
+describe("SSRF guard — ssrfGuard policy in src/server.ts", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("allowlists only http: and https: schemes", () => {
+    expect(serverSrc).toContain('parsed.protocol !== "http:"');
+    expect(serverSrc).toContain('parsed.protocol !== "https:"');
+    // file:// / gopher:// / javascript: implicitly rejected
+  });
+
+  test("blocks IPs classified as block (link-local/IMDS/multicast)", () => {
+    expect(serverSrc).toContain('verdict === "block"');
+    expect(serverSrc).toContain("link-local / IMDS / multicast / reserved");
+  });
+
+  test("strict mode opt-in via CTX_FETCH_STRICT=1", () => {
+    expect(serverSrc).toContain('process.env.CTX_FETCH_STRICT === "1"');
+    expect(serverSrc).toContain('verdict === "private" && strict');
+  });
+
+  test("ssrfGuard runs BEFORE cache lookup (poisoned cache defense)", () => {
+    // fetchOneUrl must call ssrfGuard before getSourceMeta — otherwise a
+    // previously-poisoned source label could serve attacker content from cache.
+    const fetchOneSrc = serverSrc.match(/async function fetchOneUrl\([\s\S]+?^}/m);
+    expect(fetchOneSrc).not.toBeNull();
+    const block = fetchOneSrc![0];
+    const guardIdx = block.indexOf("ssrfGuard");
+    const cacheIdx = block.indexOf("getSourceMeta");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(cacheIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(cacheIdx);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// buildFetchCode — embedded SSRF guard contract (#476 review follow-ups)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { buildFetchCode } from "../../src/server.js";
+
+describe("buildFetchCode — embedded SSRF guard contract", () => {
+  const generated = buildFetchCode("https://example.com/x", "/tmp/x");
+
+  test("failed fetch reports its cause without a Node crash stack", () => {
+    const code = buildFetchCode("http://127.0.0.1:59999", join(tmpdir(), "open_ctx-fetch-refused-test.dat"));
+    const result = spawnSync(process.execPath, ["--input-type=commonjs", "-"], {
+      input: code,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/ECONNREFUSED/);
+    expect(result.stderr).not.toMatch(/node:internal|\n\s+at\s|Node\.js v/);
+  });
+
+  test("strips proxy env vars (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) by default (#476 pinning)", () => {
+    // Default must delete proxy env vars so the in-subprocess DNS guard runs (#476).
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    delete process.env.CTX_FETCH_ALLOW_PROXY;
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).toMatch(/delete process\.env\.http_proxy/);
+      expect(src).toMatch(/delete process\.env\.https_proxy/);
+      expect(src).toMatch(/delete process\.env\.all_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_https_proxy/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
+  });
+
+  test("preserves proxy env vars when CTX_FETCH_ALLOW_PROXY=1 (#1039 opt-in)", () => {
+    // Exact "1" opt-in preserves proxy env for corporate egress; parent ssrfGuard remains.
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    process.env.CTX_FETCH_ALLOW_PROXY = "1";
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).not.toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).not.toMatch(/delete process\.env\.http_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.https_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.all_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).not.toMatch(/delete process\.env\.npm_config_https_proxy/);
+      expect(src).not.toMatch(/delete process\.env\[[^\]]*PROXY/i);
+      expect(src).not.toMatch(/process\.env\.(HTTP|HTTPS|ALL)_?PROXY\s*=\s*(undefined|null|['"]{2})/i);
+      expect(src).toMatch(/CTX_FETCH_ALLOW_PROXY=1/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
+  });
+
+  test('rejects non-"1" truthy CTX_FETCH_ALLOW_PROXY (fail-secure; still strips)', () => {
+    // Non-"1" values (e.g. "true") must still strip — fail-secure vs accidental truthy env.
+    const prev = process.env.CTX_FETCH_ALLOW_PROXY;
+    process.env.CTX_FETCH_ALLOW_PROXY = "true";
+    try {
+      const src = buildFetchCode("https://example.com/x", "/tmp/x");
+      expect(src).toMatch(/delete process\.env\.HTTP_PROXY/);
+      expect(src).toMatch(/delete process\.env\.HTTPS_PROXY/);
+      expect(src).toMatch(/delete process\.env\.ALL_PROXY/);
+      expect(src).toMatch(/delete process\.env\.http_proxy/);
+      expect(src).toMatch(/delete process\.env\.https_proxy/);
+      expect(src).toMatch(/delete process\.env\.all_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_proxy/);
+      expect(src).toMatch(/delete process\.env\.npm_config_https_proxy/);
+    } finally {
+      if (prev === undefined) delete process.env.CTX_FETCH_ALLOW_PROXY;
+      else process.env.CTX_FETCH_ALLOW_PROXY = prev;
+    }
+  });
+
+  test("embedded SSRF classifier is callable as `classifyIp` even when bundler renames the export (#bug-v1.0.133)", () => {
+    // REGRESSION: esbuild renames top-level `classifyIp` to a short name
+    // (e.g. `_h`) in server.bundle.mjs. The previous implementation embedded
+    // `classifyIp.toString()` directly, which yielded `function _h(t){...}`
+    // — but the subprocess template invokes `classifyIp(...)` literally and
+    // the function's own internal recursion uses the bundler-mangled name.
+    // Result was 100% failure of open_ctx_fetch_and_index in the published build:
+    //   ReferenceError: classifyIp is not defined
+    //     at patchedPromisesLookup (.../script.js:71:19)
+    // The fix must: (1) expose the canonical `classifyIp` identifier in the
+    // embedded scope, AND (2) preserve recursion under whatever name the
+    // bundler chose. Validate by evaluating the embedded source in an
+    // isolated scope and confirming `classifyIp` resolves and works for
+    // both direct calls AND the recursive IPv4-mapped-IPv6 path.
+    expect(generated).toMatch(/var\s+classifyIp\s*=/);
+
+    // Extract the self-contained classifier declaration block (var classifyIp
+    // = function classifyIp(rawIp){...};) and evaluate it in a fresh function
+    // scope where neither `classifyIp` nor any bundler alias exists in the
+    // outer closure. The canonical name MUST resolve and behave.
+    const classifyIpDeclMatch = generated.match(
+      /var\s+\w+\s*=\s*function\s+\w+\s*\(\s*rawIp\s*\)[\s\S]+?\n\};(?:\s*var\s+classifyIp\s*=\s*\w+;)?/,
+    );
+    expect(classifyIpDeclMatch, "embedded classifyIp declaration block must be extractable from buildFetchCode output").not.toBeNull();
+    const classifierBlock = classifyIpDeclMatch![0];
+
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const probe = new Function(`
+      ${classifierBlock}
+      return {
+        imds: classifyIp("169.254.169.254"),
+        loopback: classifyIp("127.0.0.1"),
+        publicIp: classifyIp("8.8.8.8"),
+        mapped: classifyIp("::ffff:169.254.169.254"),
+      };
+    `);
+    const result = probe() as Record<string, string>;
+    expect(result.imds).toBe("block");
+    expect(result.loopback).toBe("private");
+    expect(result.publicIp).toBe("public");
+    // IPv4-mapped IPv6 forces the internal recursive call path; if recursion
+    // is broken (bundler-mangled self-reference unresolved), this throws.
+    expect(result.mapped).toBe("block");
+  });
+
+  test("patches dns/promises lookup (separate function reference from dns.lookup)", () => {
+    // Patching dns.lookup does NOT affect dnsPromises.lookup. Today undici
+    // uses callback-form dns.lookup so default fetch is covered, but the
+    // invariant is fragile — a future undici switch or any caller using
+    // dnsPromises.lookup directly would bypass the guard.
+    // Match either literal 'node:dns/promises' or split-string 'no'+'de:dns/promises'
+    // The split form is required by the G3 bundle invariant — the literal would
+    // false-positive scripts/assert-bundle.mjs's raw-bare-require-node-builtin check.
+    expect(generated).toMatch(/const dnsPromises\s*=\s*require\([^)]*dns\/promises['"]\)/);
+    expect(generated).toMatch(/dnsPromises\.lookup\s*=\s*async\s+function/);
+    expect(generated).toMatch(/SSRF blocked/);
+  });
+
+  test("patches dns.resolve4 and dns.resolve6 (libuv bypass path)", () => {
+    // dns.resolve* uses a different code path (no getaddrinfo, no /etc/hosts)
+    // than dns.lookup — they must be patched separately or the guard is
+    // trivially bypassed by any caller using dns.resolve* directly.
+    expect(generated).toMatch(/['"]resolve4['"]\s*,\s*['"]resolve6['"]/);
+    expect(generated).toMatch(/dns\[name\]\s*=\s*function/);
+  });
+
+  describe("buildFetchCode — redirect chain rebinding", () => {
+    // SSRF rebinding via HTTP redirect chain bypasses the parent's pre-flight
+    // ssrfGuard: a 302 to http://attacker/ (or an IPv4-mapped IMDS literal)
+    // sends the subprocess fetch to an alternate host the parent never
+    // classified. The connect-time DNS guard catches some cases, but a
+    // direct-IP redirect target may not trigger getaddrinfo at all. Mitigate
+    // at the HTTP layer: emit `redirect: 'manual'` in the generated source,
+    // re-validate every Location header against ssrfGuard's classifier, and
+    // cap the redirect chain so an attacker cannot exhaust the loop.
+    const generated = buildFetchCode("https://example.com/x", "/tmp/x");
+
+    test("generated source uses redirect: 'manual' (no follow default)", () => {
+      // The default `redirect: 'follow'` lets undici chase a 3xx Location
+      // BEFORE the in-subprocess DNS guard sees the target hostname (and even
+      // when it does, a direct IPv4-literal redirect skips getaddrinfo). The
+      // generated subprocess source MUST opt out of automatic following so
+      // every hop is re-validated by classifyIp before another fetch fires.
+      expect(generated).toMatch(/redirect:\s*['"]manual['"]/);
+    });
+
+    test("manual redirect handler validates Location host via classifyIp", () => {
+      // After receiving a 3xx, the subprocess must parse the Location header,
+      // resolve its host, and run the same classifyIp policy as ssrfGuard
+      // before issuing the next fetch. Without this re-check, an attacker can
+      // redirect to http://169.254.169.254/ or any rebinding-friendly host.
+      expect(generated).toMatch(/Location/);
+      expect(generated).toMatch(/classifyIp\s*\(/);
+      // The redirect handler specifically must invoke classifyIp on the
+      // redirect target — not just the parent's pre-flight call site.
+      expect(generated).toMatch(/redirect[\s\S]{0,400}classifyIp/);
+    });
+
+    test("redirect chain is capped (no unbounded follow)", () => {
+      // An attacker controlling redirect responses could otherwise loop the
+      // subprocess forever or chain enough hops to amortize a slow rebinding
+      // attack. Cap at 5 — the standard browser limit — and abort cleanly.
+      expect(generated).toMatch(/(maxRedirects|MAX_REDIRECTS|redirectCount\s*[<>]=?\s*5|<\s*5|<=\s*5)/);
+    });
+
+    test("non-3xx response path still emits content (preserves 200 semantics)", () => {
+      // Manual redirect handling must not break the happy path: a 200 OK
+      // still flows through emit() with the right content-type branch. Pin
+      // the existing emit() call sites so a refactor that drops them fails.
+      expect(generated).toMatch(/emit\(['"]json['"]/);
+      expect(generated).toMatch(/emit\(['"]html['"]/);
+      expect(generated).toMatch(/emit\(['"]text['"]/);
+    });
+  });
+
+  test("classifyIp embeds without references to module scope", () => {
+    // classifyIp is embedded into the subprocess via Function.prototype.toString().
+    // If a future change ever has classifyIp close over a module-scope helper
+    // (e.g. a regex constant declared above it), the embedded source will
+    // ReferenceError at parse or call time — silently breaking the guard. Pin
+    // the contract: classifyIp source must contain no identifiers that can
+    // only resolve in module scope.
+    const src = classifyIp.toString();
+    const forbidden = ["require(", "process.", "globalThis.", "global.", "__dirname", "__filename"];
+    for (const ident of forbidden) {
+      expect(src).not.toContain(ident);
+    }
+    // Roundtrip: eval the source in an empty vm context with no globals,
+    // then invoke it. This is exactly what the subprocess does.
+    const { runInNewContext } = require("node:vm");
+    const ctx: Record<string, unknown> = {};
+    runInNewContext(`${src}\n;globalThis.fn = classifyIp;`, ctx);
+    const fn = ctx.fn as (ip: string) => "block" | "private" | "public";
+    expect(fn("169.254.169.254")).toBe("block");
+    expect(fn("8.8.8.8")).toBe("public");
+    expect(fn("10.0.0.1")).toBe("private");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// buildFetchCode — IPv6 zone-id + generic dns.resolve (#476 round-3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("buildFetchCode — IPv6 zone-id + generic dns.resolve", () => {
+  test("classifyIp strips IPv6 zone-id before classification (link-local)", () => {
+    // fe80::/10 link-local with %eth0 zone suffix must still be blocked.
+    // Today the lowercase prefix check `fe8`/`fe9`/`fea`/`feb` accidentally
+    // catches link-local even with a zone suffix — but only because the
+    // suffix is appended *after* the prefix. Pin the behavior explicitly so
+    // a future refactor cannot regress.
+    expect(classifyIp("fe80::1%eth0")).toBe("block");
+    expect(classifyIp("fe80::1%25eth0")).toBe("block"); // URL-encoded zone
+  });
+
+  test("classifyIp strips IPv6 zone-id before classification (non-link-local)", () => {
+    // RFC 6874 permits zone identifiers on any IPv6 address (not just
+    // link-local). Without zone stripping, a loopback `::1%eth0` would NOT
+    // match the strict equality `lower === "::1"` and would leak through as
+    // "public". Pin every class so the strip happens before classification.
+    expect(classifyIp("::1%eth0")).toBe("private"); // loopback w/ zone
+    expect(classifyIp("fc00::1%eth0")).toBe("private"); // ULA w/ zone
+    expect(classifyIp("ff00::1%eth0")).toBe("block"); // multicast w/ zone
+    expect(classifyIp("2001:db8::1%eth0")).toBe("public"); // doc range w/ zone
+  });
+
+  test("buildFetchCode patches generic dns.resolve (not just resolve4/resolve6)", () => {
+    // dns.resolve is the polymorphic entrypoint that dispatches on rrtype.
+    // Today only resolve4/resolve6 are patched; a caller using
+    // `dns.resolve(host, 'A', cb)` or default rrtype goes through an
+    // un-guarded code path. Patch the generic wrapper so every A/AAAA
+    // record runs through classifyIp.
+    const generated = buildFetchCode("https://example.com/x", "/tmp/x");
+    expect(generated).toMatch(/dns\.resolve\s*=\s*function/);
+    expect(generated).toMatch(/classifyIp/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_doctor resource cleanup regression (#247)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const mcpEntry = resolve(__dirname, "..", "..", "start.mjs");
+
+interface DoctorJsonRpcResponse {
+  jsonrpc: "2.0";
+  id: number;
+  result?: {
+    content?: Array<{ type: string; text: string }>;
+    isError?: boolean;
+    serverInfo?: { name: string; version: string };
+  };
+  error?: { code: number; message: string };
+}
+
+function startMcpServer(extraEnv: Record<string, string> = {}): ChildProcess {
+  return spawn("node", [mcpEntry], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+      ...extraEnv,
+    },
+  });
+}
+
+function sendRpc(proc: ChildProcess, msg: Record<string, unknown>): void {
+  proc.stdin!.write(JSON.stringify(msg) + "\n");
+}
+
+/**
+ * Read RPC responses from the server stdout until all `expectedIds` have
+ * arrived or `timeoutMs` elapses, whichever comes first. Early-exit keeps
+ * the happy path at <1s and gives Windows CI its full timeout budget when
+ * process spawn + native-module load runs slow.
+ */
+function collectRpcResponses(proc: ChildProcess, timeoutMs: number, expectedIds: number[]): Promise<DoctorJsonRpcResponse[]> {
+  return new Promise((res) => {
+    const expected = new Set(expectedIds);
+    const seen = new Map<number, DoctorJsonRpcResponse>();
+    let buffer = "";
+    // eslint-disable-next-line prefer-const -- re-armed on every stdout chunk
+    let timer: ReturnType<typeof setTimeout>;
+
+    const finish = () => {
+      clearTimeout(timer);
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+      res(Array.from(seen.values()));
+    };
+
+    proc.stdout!.on("data", (d: Buffer) => {
+      buffer += d.toString();
+      // Drain whole lines from the buffer. Stdout is newline-delimited JSON-RPC.
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+          if (typeof parsed.id === "number" && expected.has(parsed.id)) {
+            seen.set(parsed.id, parsed);
+            if (seen.size === expected.size) {
+              finish();
+              return;
+            }
+          }
+        } catch {
+          /* ignore malformed / partial lines */
+        }
+      }
+    });
+
+    timer = setTimeout(finish, timeoutMs);
+  });
+}
+
+async function initAndCallDoctor(proc: ChildProcess, invocations: number, windowMs = 15_000): Promise<DoctorJsonRpcResponse[]> {
+  sendRpc(proc, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "open_ctx-doctor-regression", version: "1.0" },
+    },
+  });
+  sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+  const ids: number[] = [];
+  for (let i = 0; i < invocations; i++) {
+    const id = 100 + i;
+    ids.push(id);
+    sendRpc(proc, {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "open_ctx_doctor", arguments: {} },
+    });
+  }
+  return collectRpcResponses(proc, windowMs, ids);
+}
+
+describe("open_ctx_doctor — resource cleanup regression (#247)", () => {
+  test("single open_ctx_doctor call returns a status report", async () => {
+    const proc = startMcpServer();
+    const responses = await initAndCallDoctor(proc, 1);
+    const call = responses.find((r) => r.id === 100);
+    expect(call).toBeDefined();
+    expect(call!.error).toBeUndefined();
+    const text = call!.result?.content?.[0]?.text ?? "";
+    expect(text).toContain("open-context-mode doctor");
+    expect(text).toMatch(/Server test:/);
+    expect(text).toMatch(/FTS5 \/ SQLite:/);
+  }, 30_000);
+
+  test("open_ctx_doctor reports storage roots and ignored empty override", async () => {
+    const storageRoot = mkdtempSync(join(tmpdir(), "open_ctx-doctor-storage-"));
+    const proc = startMcpServer({
+      OPEN_CONTEXT_MODE_DIR: " \t ",
+      HOME: storageRoot,
+      USERPROFILE: storageRoot,
+    });
+    const responses = await initAndCallDoctor(proc, 1);
+    const call = responses.find((r) => r.id === 100);
+
+    expect(call).toBeDefined();
+    expect(call!.error).toBeUndefined();
+    const text = call!.result?.content?.[0]?.text ?? "";
+    expect(text).toContain("Storage sessions:");
+    expect(text).toContain("Storage content:");
+    expect(text).toContain("Storage stats:");
+    expect(text).toContain("(default; ignored empty OPEN_CONTEXT_MODE_DIR)");
+  }, 30_000);
+
+  test("open_ctx_doctor reports storage root override source", async () => {
+    const storageRoot = mkdtempSync(join(tmpdir(), "open_ctx-doctor-storage-root-"));
+    const proc = startMcpServer({ OPEN_CONTEXT_MODE_DIR: storageRoot });
+    const responses = await initAndCallDoctor(proc, 1);
+    const call = responses.find((r) => r.id === 100);
+
+    expect(call).toBeDefined();
+    expect(call!.error).toBeUndefined();
+    const text = call!.result?.content?.[0]?.text ?? "";
+    expect(text).toContain(`Storage sessions: ${join(storageRoot, "sessions")} (via OPEN_CONTEXT_MODE_DIR)`);
+    expect(text).toContain(`Storage content: ${join(storageRoot, "content")} (via OPEN_CONTEXT_MODE_DIR)`);
+    expect(text).toContain(`Storage stats: ${join(storageRoot, "sessions")} (via OPEN_CONTEXT_MODE_DIR)`);
+  }, 30_000);
+
+  test("three concurrent open_ctx_doctor calls all succeed without crashing the server", async () => {
+    const proc = startMcpServer();
+    const responses = await initAndCallDoctor(proc, 3, 20_000);
+    const calls = [100, 101, 102].map((id) => responses.find((r) => r.id === id));
+    for (const c of calls) {
+      expect(c, "missing open_ctx_doctor response — server likely crashed").toBeDefined();
+      expect(c!.error).toBeUndefined();
+      expect(c!.result?.content?.[0]?.text).toContain("open-context-mode doctor");
+    }
+  }, 35_000);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_doctor renderer-safe output (Mickey #3 — Z.ai GLM compatibility)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Z.ai's MCP renderer crashes with `ReferenceError: client is not defined`
+// when it parses GitHub-flavored markdown task-list syntax (`- [x]`, `- [ ]`,
+// `- [-]`). To stay safe across all MCP clients (including renderers that mount
+// custom React components for task lists or h2 headers), open_ctx_doctor MUST emit
+// plain-text status prefixes (`[OK]`, `[FAIL]`, `[WARN]`) and avoid `##`
+// headings.
+describe("open_ctx_doctor — renderer-safe output (Z.ai compat)", () => {
+  test("output uses [OK]/[FAIL]/[WARN] prefixes and no markdown task-list syntax", async () => {
+    const proc = startMcpServer();
+    const responses = await initAndCallDoctor(proc, 1);
+    const call = responses.find((r) => r.id === 100);
+    expect(call).toBeDefined();
+    expect(call!.error).toBeUndefined();
+    const text: string = call!.result?.content?.[0]?.text ?? "";
+
+    // Must NOT contain GFM task-list syntax (triggers Z.ai's broken renderer)
+    expect(text).not.toMatch(/-\s+\[x\]/);
+    expect(text).not.toMatch(/-\s+\[ \]/);
+    expect(text).not.toMatch(/-\s+\[-\]/);
+
+    // Must NOT contain `## ` h2 (some renderers mount custom h2 components)
+    expect(text).not.toMatch(/^##\s/m);
+
+    // Must use plain-text status prefixes
+    expect(text).toMatch(/\[OK\]/);
+    // Header is plain text, no markdown
+    expect(text).toMatch(/^open-context-mode doctor/m);
+  }, 30_000);
+});
+
+describe("open_ctx_doctor hook script checks", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("resolves relative hook script paths against pluginRoot", () => {
+    const doctorSection = serverSrc.slice(serverSrc.indexOf("open_ctx_doctor"), serverSrc.indexOf("open_ctx_purge"));
+    expect(doctorSection).toContain("for (const scriptPath of hookScriptPaths)");
+    expect(doctorSection).toContain("const hookPath = resolve(pluginRoot, scriptPath)");
+    expect(doctorSection).not.toContain("for (const hookPath of hookScriptPaths)");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_fetch_and_index cache-key collision (Fix 6/10)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Bug: cache key was `source ?? url`, so two distinct URLs sharing a `source`
+// label silently returned the cached first response instead of fetching the
+// second. Fix composes the cache key from label+url for cache lookup.
+
+describe("open_ctx_fetch_and_index cache key includes URL (Fix 6/10)", () => {
+  test("composeFetchCacheKey: same label + different URLs produce different keys", async () => {
+    const { composeFetchCacheKey } = await import("../../src/fetch-cache.js");
+    const k1 = composeFetchCacheKey("Docs", "https://x.com/a");
+    const k2 = composeFetchCacheKey("Docs", "https://y.com/b");
+    expect(k1).not.toBe(k2);
+  });
+
+  test("composeFetchCacheKey: same label + same URL → same key (legitimate cache hit)", async () => {
+    const { composeFetchCacheKey } = await import("../../src/fetch-cache.js");
+    const k1 = composeFetchCacheKey("Docs", "https://x.com/a");
+    const k2 = composeFetchCacheKey("Docs", "https://x.com/a");
+    expect(k1).toBe(k2);
+  });
+
+  test("server.ts uses composeFetchCacheKey for cache lookup (no bare-label collision)", () => {
+    const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+    // The cache lookup may live in the handler block OR in an extracted helper
+    // (post-refactor: `fetchOneUrl` is the parallel-safe fetcher invoked by both
+    // single-URL and batch paths). Either location must use composeFetchCacheKey,
+    // not the bare label/url variable.
+
+    // composeFetchCacheKey must be imported and referenced
+    expect(serverSrc).toContain('from "./fetch-cache.js"');
+    expect(serverSrc).toContain("composeFetchCacheKey");
+
+    // Find ANY getSourceMeta call across the file
+    const lookupCall = serverSrc.match(/getSourceMeta\(\s*([^)]+)\s*\)/);
+    expect(lookupCall, "getSourceMeta call missing").not.toBeNull();
+    const arg = lookupCall![1].trim();
+    // Must NOT be the bare `label` variable (that was the bug).
+    expect(arg).not.toBe("label");
+    // Argument must be a key derived from composition (`cacheKey`, `storageLabel`,
+    // or a direct `composeFetchCacheKey(...)` call). Reject any single-token
+    // identifier that doesn't carry the composition contract.
+    expect(arg).toMatch(/cacheKey|storageLabel|composeFetchCacheKey/);
+  });
+
+  test("ContentStore: per-(label,url) keys do not collide on getSourceMeta", () => {
+    const store = new ContentStore(":memory:");
+    // Simulate two distinct URLs sharing a user-supplied "source" label,
+    // but stored under composed keys per the fix.
+    const URL_A = "https://example.com/a";
+    const URL_B = "https://example.com/b";
+    const labelA = `Docs::${URL_A}`;
+    const labelB = `Docs::${URL_B}`;
+
+    store.index({ content: "# A\nContent A unique alpha", source: labelA });
+    // Before fix: a second cache lookup with the bare "Docs" label would
+    // hit A's meta and short-circuit. After fix: lookup uses labelB → miss.
+    expect(store.getSourceMeta(labelB)).toBeNull();
+    // Cache hit for the same (label,url) still works.
+    expect(store.getSourceMeta(labelA)).not.toBeNull();
+
+    // Now index B and verify both remain searchable independently.
+    store.index({ content: "# B\nContent B unique bravo", source: labelB });
+    const aResults = store.search("alpha", 5, labelA);
+    const bResults = store.search("bravo", 5, labelB);
+    expect(aResults.length).toBeGreaterThan(0);
+    expect(bResults.length).toBeGreaterThan(0);
+    store.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_insight process helpers (formerly tests/core/process-utils.test.ts)
+//
+// Behavioral tests for browserOpenArgv / openBrowserSync / killProcessOnPort
+// (canonical home: src/server.ts). PR #452 review flagged that source-grep
+// tests pin implementation strings, not the actual security property. These
+// tests mock spawnSync directly and assert:
+//
+//   - argv arrays only — never `shell: true`
+//   - per-platform fallback semantics (xdg-open → sensible-browser)
+//   - Windows netstat parser anchors on LISTENING + local-address column
+//   - per-pid kill failures do not abort the remaining loop
+//   - structured results surface failure to callers
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { vi } from "vitest";
+import { browserOpenArgv, openBrowserSync, killProcessOnPort, type SpawnSyncFn } from "../../src/server.js";
+
+type Captured = { cmd: string; args: readonly string[]; opts: unknown };
+type FakeReturn = { status: number | null; stdout?: string; error?: Error };
+
+function makeRunner(responses: Array<FakeReturn | ((cmd: string, args: readonly string[]) => FakeReturn)>): {
+  runner: SpawnSyncFn;
+  calls: Captured[];
+} {
+  const calls: Captured[] = [];
+  let i = 0;
+  const runner: SpawnSyncFn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const next = responses[i++];
+    const r = typeof next === "function" ? next(cmd, args) : next;
+    return {
+      pid: 0,
+      output: [],
+      stdout: r?.stdout ?? "",
+      stderr: "",
+      status: r?.status ?? 0,
+      signal: null,
+      error: r?.error,
+    } as ReturnType<SpawnSyncFn>;
+  };
+  return { runner, calls };
+}
+
+describe("browserOpenArgv", () => {
+  test("darwin → open url", () => {
+    expect(browserOpenArgv("http://x", "darwin")).toEqual([{ cmd: "open", args: ["http://x"] }]);
+  });
+
+  test("win32 → cmd /c start with empty title", () => {
+    // The empty-string title arg is the security-relevant detail: if it were
+    // dropped, `start "http://attacker?evil=1"` would be parsed as a window
+    // title rather than a URL.
+    expect(browserOpenArgv("http://x", "win32")).toEqual([{ cmd: "cmd", args: ["/c", "start", "", "http://x"] }]);
+  });
+
+  test("linux → xdg-open then sensible-browser fallback", () => {
+    expect(browserOpenArgv("http://x", "linux")).toEqual([
+      { cmd: "xdg-open", args: ["http://x"] },
+      { cmd: "sensible-browser", args: ["http://x"] },
+    ]);
+  });
+
+  test("argv contains url as a single argument — no shell metachar expansion", () => {
+    // A URL with shell metachars must appear verbatim as one argv entry on
+    // every platform. If it were ever interpolated into a shell string, the
+    // `; rm -rf /` would split into a separate command.
+    const evil = "http://x; rm -rf /; #";
+    for (const platform of ["darwin", "win32", "linux"] as const) {
+      const attempts = browserOpenArgv(evil, platform);
+      for (const { args } of attempts) {
+        expect(args).toContain(evil);
+      }
+    }
+  });
+});
+
+describe("openBrowserSync", () => {
+  test("darwin: spawnSync('open', [url]) with no shell:true", () => {
+    const { runner, calls } = makeRunner([{ status: 0 }]);
+    const r = openBrowserSync("http://x", "darwin", runner);
+
+    expect(r.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe("open");
+    expect(calls[0].args).toEqual(["http://x"]);
+    expect(calls[0].opts).not.toHaveProperty("shell", true);
+  });
+
+  test("win32: cmd /c start '' url, no shell:true", () => {
+    const { runner, calls } = makeRunner([{ status: 0 }]);
+    openBrowserSync("http://x", "win32", runner);
+
+    expect(calls[0].cmd).toBe("cmd");
+    expect(calls[0].args).toEqual(["/c", "start", "", "http://x"]);
+    expect(calls[0].opts).not.toHaveProperty("shell", true);
+  });
+
+  test("linux: xdg-open status=0 → sensible-browser is NOT called", () => {
+    const { runner, calls } = makeRunner([{ status: 0 }]);
+    const r = openBrowserSync("http://x", "linux", runner);
+
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.method).toBe("xdg-open");
+    expect(calls.map((c) => c.cmd)).toEqual(["xdg-open"]);
+  });
+
+  test("linux: xdg-open status!=0 → sensible-browser fallback fires", () => {
+    const { runner, calls } = makeRunner([{ status: 3 }, { status: 0 }]);
+    const r = openBrowserSync("http://x", "linux", runner);
+
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.method).toBe("sensible-browser");
+    expect(calls.map((c) => c.cmd)).toEqual(["xdg-open", "sensible-browser"]);
+  });
+
+  test("linux: xdg-open killed by signal (status=null + error) → fallback fires", () => {
+    // The pre-fix bug: status===null was treated as success. Verify both
+    // signal-kill and ENOENT trigger the fallback.
+    const { runner, calls } = makeRunner([{ status: null, error: new Error("Killed by signal") }, { status: 0 }]);
+    const r = openBrowserSync("http://x", "linux", runner);
+
+    expect(r.ok).toBe(true);
+    expect(calls.map((c) => c.cmd)).toEqual(["xdg-open", "sensible-browser"]);
+  });
+
+  test("linux: both xdg-open and sensible-browser fail → ok=false with reason", () => {
+    const { runner } = makeRunner([
+      { status: 1, error: new Error("ENOENT xdg-open") },
+      { status: 1, error: new Error("ENOENT sensible-browser") },
+    ]);
+    const r = openBrowserSync("http://x", "linux", runner);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.method).toBe("none");
+      expect(r.reason).toContain("xdg-open");
+      expect(r.reason).toContain("sensible-browser");
+    }
+  });
+
+  test("runner throws synchronously → caught, surfaced in reason", () => {
+    const runner: SpawnSyncFn = () => {
+      throw new Error("EMFILE");
+    };
+    const r = openBrowserSync("http://x", "darwin", runner);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("EMFILE");
+  });
+});
+
+describe("killProcessOnPort — Linux/macOS (lsof)", () => {
+  test("port free (lsof status=1, empty stdout) → no kill, no error", () => {
+    const { runner, calls } = makeRunner([{ status: 1, stdout: "" }]);
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(r.killedPids).toEqual([]);
+    expect(r.attemptedPids).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe("lsof");
+    expect(calls[0].args).toEqual(["-ti", ":4747"]);
+  });
+
+  test("lsof ENOENT (binary missing) → surfaced as error, no kill attempt", () => {
+    const { runner, calls } = makeRunner([{ status: null, error: new Error("ENOENT") }]);
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(r.attemptedPids).toEqual([]);
+    expect(r.errors.join(" ")).toMatch(/lsof.*ENOENT/);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("two pids, both kill cleanly → both reported as killed", () => {
+    const { runner, calls } = makeRunner([{ status: 0, stdout: "1234\n5678\n" }, { status: 0 }, { status: 0 }]);
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(r.killedPids).toEqual(["1234", "5678"]);
+    expect(r.attemptedPids).toEqual(["1234", "5678"]);
+    expect(r.errors).toEqual([]);
+
+    // Argv check: each kill receives the pid as a single argv entry.
+    expect(calls[1]).toEqual(expect.objectContaining({ cmd: "kill", args: ["1234"] }));
+    expect(calls[2]).toEqual(expect.objectContaining({ cmd: "kill", args: ["5678"] }));
+  });
+
+  test("first pid kill fails → second pid still attempted (no abort)", () => {
+    // Pre-fix: try/catch wrapped the entire for-loop, so a single pid
+    // failure aborted the rest of the kills.
+    const { runner } = makeRunner([
+      { status: 0, stdout: "1111\n2222\n3333\n" },
+      { status: 1, error: new Error("EPERM") },
+      { status: 0 },
+      { status: 0 },
+    ]);
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(r.attemptedPids).toEqual(["1111", "2222", "3333"]);
+    expect(r.killedPids).toEqual(["2222", "3333"]);
+    expect(r.errors.join(" ")).toMatch(/kill 1111/);
+  });
+
+  test("runner throws on a kill → loop continues, error captured", () => {
+    let calls = 0;
+    const runner: SpawnSyncFn = (cmd, args) => {
+      calls++;
+      if (cmd === "lsof") {
+        return {
+          pid: 0,
+          output: [],
+          stdout: "1\n2\n",
+          stderr: "",
+          status: 0,
+          signal: null,
+        } as ReturnType<SpawnSyncFn>;
+      }
+      if (cmd === "kill" && args[0] === "1") throw new Error("boom");
+      return {
+        pid: 0,
+        output: [],
+        stdout: "",
+        stderr: "",
+        status: 0,
+        signal: null,
+      } as ReturnType<SpawnSyncFn>;
+    };
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(calls).toBe(3);
+    expect(r.attemptedPids).toEqual(["1", "2"]);
+    expect(r.killedPids).toEqual(["2"]);
+    expect(r.errors.join(" ")).toMatch(/boom/);
+  });
+
+  test("garbage in lsof stdout is filtered (only digit-PIDs accepted)", () => {
+    const { runner, calls } = makeRunner([{ status: 0, stdout: "1234\n\nNot-a-pid\n5678\n" }, { status: 0 }, { status: 0 }]);
+    const r = killProcessOnPort(4747, "linux", runner);
+
+    expect(r.killedPids).toEqual(["1234", "5678"]);
+    expect(calls).toHaveLength(3); // lsof + 2 kills
+  });
+});
+
+describe("killProcessOnPort — Windows (netstat)", () => {
+  // Sample netstat -ano output. The MUST-NOT-KILL row's REMOTE column
+  // contains :4747 — pre-fix `line.includes(":4747")` matched it and killed
+  // the unrelated PID 9876.
+  const netstatOut = [
+    "Active Connections",
+    "",
+    "  Proto  Local Address          Foreign Address        State           PID",
+    "  TCP    0.0.0.0:4747           0.0.0.0:0              LISTENING       1234",
+    "  TCP    192.168.1.5:54321      8.8.8.8:4747           ESTABLISHED     9876", // MUST NOT match
+    "  UDP    0.0.0.0:4747           *:*                                    5555", // UDP, must not match
+    "  TCP    [::]:4747              [::]:0                 LISTENING       1235",
+    "",
+  ].join("\r\n");
+
+  test("only LISTENING TCP rows whose LOCAL column ends with :port are killed", () => {
+    const { runner, calls } = makeRunner([
+      { status: 0, stdout: netstatOut },
+      { status: 0 }, // taskkill 1234
+      { status: 0 }, // taskkill 1235
+    ]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.attemptedPids).toEqual(expect.arrayContaining(["1234", "1235"]));
+    expect(r.attemptedPids).not.toContain("9876"); // remote-port match — was the bug
+    expect(r.attemptedPids).not.toContain("5555"); // UDP — must not be killed
+
+    // taskkill argv: /F /PID <pid> with no shell:true
+    const killCalls = calls.filter((c) => c.cmd === "taskkill");
+    for (const c of killCalls) {
+      expect(c.args[0]).toBe("/F");
+      expect(c.args[1]).toBe("/PID");
+      expect(c.opts).not.toHaveProperty("shell", true);
+    }
+  });
+
+  test("netstat ENOENT → surfaced as error", () => {
+    const { runner } = makeRunner([{ status: null, error: new Error("ENOENT") }]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.errors.join(" ")).toMatch(/netstat.*ENOENT/);
+    expect(r.attemptedPids).toEqual([]);
+  });
+
+  test("first taskkill fails → second pid still attempted", () => {
+    const { runner } = makeRunner([
+      { status: 0, stdout: netstatOut },
+      { status: 1, error: new Error("Access denied") }, // taskkill 1234
+      { status: 0 }, // taskkill 1235
+    ]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.attemptedPids).toContain("1234");
+    expect(r.attemptedPids).toContain("1235");
+    expect(r.killedPids).toContain("1235");
+    expect(r.killedPids).not.toContain("1234");
+    expect(r.errors.join(" ")).toMatch(/taskkill 1234/);
+  });
+});
+
+describe("killProcessOnPort — input validation", () => {
+  test("rejects out-of-range port without spawning anything", () => {
+    const spy = vi.fn();
+    const r = killProcessOnPort(70000, "linux", spy as unknown as SpawnSyncFn);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(r.errors.join(" ")).toMatch(/invalid port/);
+  });
+
+  test("rejects non-integer port without spawning anything", () => {
+    const spy = vi.fn();
+    const r = killProcessOnPort(3.14 as number, "linux", spy as unknown as SpawnSyncFn);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(r.errors.join(" ")).toMatch(/invalid port/);
+  });
+});
+
+// ─── open_ctx_insight helper follow-ups (#441 follow-up) ──────────────────────────
+//
+// 1. Hard timeout on every helper-internal spawnSync. A hung lsof/xdg-open/
+//    taskkill would otherwise block the MCP tool indefinitely. We assert the
+//    timeout option is propagated to the runner — the actual cap value is an
+//    implementation detail, but its presence is the regression we lock.
+//
+// 2. Windows non-English locale support. The pre-followup parser keyed off
+//    `state !== "LISTENING"` which is locale-translated (Windows-FR shows
+//    `À l'écoute`, Windows-DE `ABHÖREN`, Windows-ES `ESCUCHANDO`, etc.), so
+//    on non-EN Windows the helper would silently match zero rows and never
+//    free a stuck dashboard port. The remote-address column is NOT
+//    locale-translated; we now key off it instead.
+
+describe("Helper spawnSync timeout (#441 follow-up)", () => {
+  test("openBrowserSync passes a timeout to the runner", () => {
+    const { runner, calls } = makeRunner([{ status: 0 }]);
+    openBrowserSync("http://x", "darwin", runner);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].opts).toBeDefined();
+    expect(typeof (calls[0].opts as { timeout?: number }).timeout).toBe("number");
+    expect((calls[0].opts as { timeout: number }).timeout).toBeGreaterThan(0);
+  });
+
+  test("killProcessOnPort (Linux) passes a timeout to lsof and kill", () => {
+    const { runner, calls } = makeRunner([
+      { status: 0, stdout: "1234\n" },
+      { status: 0 }, // kill 1234
+    ]);
+    killProcessOnPort(4747, "linux", runner);
+
+    expect(calls).toHaveLength(2);
+    for (const c of calls) {
+      expect(typeof (c.opts as { timeout?: number }).timeout).toBe("number");
+      expect((c.opts as { timeout: number }).timeout).toBeGreaterThan(0);
+    }
+  });
+
+  test("killProcessOnPort (Windows) passes a timeout to netstat and taskkill", () => {
+    const winFixture = [
+      "  Proto  Local Address          Foreign Address        State           PID",
+      "  TCP    0.0.0.0:4747           0.0.0.0:0              LISTENING       1234",
+      "",
+    ].join("\r\n");
+    const { runner, calls } = makeRunner([
+      { status: 0, stdout: winFixture },
+      { status: 0 }, // taskkill 1234
+    ]);
+    killProcessOnPort(4747, "win32", runner);
+
+    expect(calls.map((c) => c.cmd)).toEqual(["netstat", "taskkill"]);
+    for (const c of calls) {
+      expect(typeof (c.opts as { timeout?: number }).timeout).toBe("number");
+      expect((c.opts as { timeout: number }).timeout).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("killProcessOnPort — Windows non-English locale (#441 follow-up)", () => {
+  // Same regression fixture as the en-US Windows test, but with the STATE
+  // column translated. Pre-followup, the helper required `state === "LISTENING"`
+  // and so silently produced zero PIDs on non-EN Windows. The follow-up keys
+  // off the remote-address column (locale-independent) so this fixture must
+  // now match LISTENING rows 1234 + 1235 and skip the ESTABLISHED row 9876
+  // and the UDP row 5555.
+  const netstatFr = [
+    "Connexions actives",
+    "",
+    "  Proto  Adresse locale         Adresse distante       État            PID",
+    "  TCP    0.0.0.0:4747           0.0.0.0:0              À l'écoute      1234",
+    "  TCP    192.168.1.5:54321      8.8.8.8:4747           ESTABLI         9876",
+    "  UDP    0.0.0.0:4747           *:*                                    5555",
+    "  TCP    [::]:4747              [::]:0                 À l'écoute      1235",
+    "",
+  ].join("\r\n");
+
+  const netstatDe = [
+    "Aktive Verbindungen",
+    "",
+    "  Proto  Lokale Adresse         Remoteadresse          Status          PID",
+    "  TCP    0.0.0.0:4747           0.0.0.0:0              ABHÖREN         1234",
+    "  TCP    192.168.1.5:54321      8.8.8.8:4747           HERGESTELLT     9876",
+    "  TCP    [::]:4747              [::]:0                 ABHÖREN         1235",
+    "",
+  ].join("\r\n");
+
+  test("French Windows netstat output: kills 1234 and 1235, ignores 9876 + 5555", () => {
+    const { runner } = makeRunner([
+      { status: 0, stdout: netstatFr },
+      { status: 0 }, // taskkill 1234
+      { status: 0 }, // taskkill 1235
+    ]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.attemptedPids).toEqual(expect.arrayContaining(["1234", "1235"]));
+    expect(r.attemptedPids).not.toContain("9876");
+    expect(r.attemptedPids).not.toContain("5555");
+    expect(r.killedPids).toEqual(expect.arrayContaining(["1234", "1235"]));
+  });
+
+  test("German Windows netstat output: kills 1234 and 1235, ignores 9876", () => {
+    const { runner } = makeRunner([
+      { status: 0, stdout: netstatDe },
+      { status: 0 }, // taskkill 1234
+      { status: 0 }, // taskkill 1235
+    ]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.attemptedPids).toEqual(expect.arrayContaining(["1234", "1235"]));
+    expect(r.attemptedPids).not.toContain("9876");
+    expect(r.killedPids).toEqual(expect.arrayContaining(["1234", "1235"]));
+  });
+
+  test("a connected remote :port still does NOT match (remote-column anchor)", () => {
+    // Sanity: the predicate must still reject the ESTABLISHED row whose
+    // REMOTE is 8.8.8.8:4747. This was the original pre-#441 bug; the
+    // follow-up must not regress it while changing the locale strategy.
+    const onlyEstablished = [
+      "  Proto  Local Address          Foreign Address        State           PID",
+      "  TCP    192.168.1.5:54321      8.8.8.8:4747           ESTABLISHED     9876",
+      "",
+    ].join("\r\n");
+    const { runner, calls } = makeRunner([{ status: 0, stdout: onlyEstablished }]);
+    const r = killProcessOnPort(4747, "win32", runner);
+
+    expect(r.attemptedPids).toEqual([]);
+    expect(calls).toHaveLength(1); // netstat only — no taskkill issued
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Prose-style policy (issue #482)
+// ═══════════════════════════════════════════════════════════════════════════
+// Decision: open-context-mode keeps raw data out of context but does not dictate
+// how the model writes its final answer. Aggressive brevity prompts have been
+// shown to degrade coding/reasoning benchmarks (Moonshot AI on kimi-k2.5).
+// Any caveman/terse-style language in shipped artifacts is a regression.
+
+describe("prose-style policy (#482)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+  const routingBlock = readFileSync(resolve(__dirname, "../../hooks/routing-block.mjs"), "utf-8");
+
+  test("no caveman/terse directive lands in any MCP tool description", () => {
+    expect(serverSrc).not.toMatch(/terse like caveman/i);
+    expect(serverSrc).not.toMatch(/only fluff die/i);
+  });
+
+  test("routing-block has no <communication_style> or <response_format> blocks", () => {
+    expect(routingBlock).not.toMatch(/<communication_style>/);
+    expect(routingBlock).not.toMatch(/<response_format>/);
+    expect(routingBlock).not.toMatch(/terse like caveman/i);
+  });
+
+  test("README does not advertise an Output Compression pillar", () => {
+    const readme = readFileSync(resolve(__dirname, "../../README.md"), "utf-8");
+    expect(readme).not.toMatch(/\*\*Output Compression\*\*/);
+    expect(readme).not.toMatch(/terse like caveman/i);
+  });
+
+  test("committed bundles (cli/server/hooks) carry no caveman strings", () => {
+    // Defense-in-depth: src/* is stripped, but the npm-shipped bundles are
+    // built artifacts that could lag if a future release rebuilds from a
+    // dirty tree. Lock the deletion to the actually-published files too
+    // (round-5 finding).
+    const bundlePaths = [
+      "../../server.bundle.mjs",
+      "../../cli.bundle.mjs",
+      "../../hooks/session-extract.bundle.mjs",
+      "../../hooks/session-snapshot.bundle.mjs",
+      "../../hooks/session-db.bundle.mjs",
+    ];
+    for (const rel of bundlePaths) {
+      const p = resolve(__dirname, rel);
+      try {
+        const content = readFileSync(p, "utf-8");
+        expect(content).not.toMatch(/terse like caveman/i);
+        expect(content).not.toMatch(/only fluff die/i);
+      } catch (err) {
+        // Bundle missing on this checkout (e.g., fresh clone before
+        // `npm run bundle`). That is fine — CI's Build step generates
+        // them; this test only asserts negative when the file exists.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// homedir() import smoke test (round-5 finding from cluster C+E+G).
+// The merge at 43c63cb dropped this import; b8ca35e restored it. A future
+// merge could lose it again silently. Pin the contract: enumerateAdapterDirs
+// must work with a stubbed home and resolve to a path under that home.
+// ─────────────────────────────────────────────────────────
+describe("analytics homedir() import is alive (#43c63cb regression guard)", () => {
+  test("enumerateAdapterDirs() resolves a sessionsDir under the host home", async () => {
+    const { enumerateAdapterDirs } = await import("../../src/session/analytics-query.js");
+    const { homedir } = await import("node:os");
+    const dirs = enumerateAdapterDirs();
+    expect(dirs.length).toBeGreaterThan(0);
+    // At least one entry must mention the actual home directory — proves
+    // homedir() resolution is wired all the way through.
+    const home = homedir();
+    expect(dirs.every((d) => d.sessionsDir.startsWith(home))).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────
+// Startup banner suppression in stdio transport mode.
+// When the server runs as a child process (stdin is not a TTY), the banner
+// must not appear on stderr — Pi and other hosts render stderr in their UI.
+// ─────────────────────────────────────────────────────────
+describe("startup banner suppressed in stdio transport mode", () => {
+  test("no banner on stderr when stdin is not a TTY (child process)", async () => {
+    const bundlePath = resolve(__dirname, "../../server.bundle.mjs");
+    if (!existsSync(bundlePath)) return;
+
+    const stderr = await new Promise<string>((res) => {
+      const proc = spawn(process.execPath, [bundlePath], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, OPEN_CONTEXT_MODE_SUPPRESS_SECURITY_WARNING: "1" },
+      });
+      let data = "";
+      proc.stderr.on("data", (chunk: Buffer) => {
+        data += chunk.toString();
+      });
+      setTimeout(() => {
+        proc.kill();
+        res(data);
+      }, 300);
+    });
+
+    expect(stderr).not.toContain("Open Context Mode MCP server");
+    expect(stderr).not.toContain("Detected runtimes:");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v1.0.134 SLICE A — cross-adapter session attribution
+// CLAUDE_SESSION_ID env var is NOT propagated to MCP servers (only hooks).
+// `resolveSessionIdFromSessionDB` must read the most-recent session_id from
+// THIS project's session DB so chunk attribution works on every adapter
+// (cursor, codex, gemini, kiro, opencode, etc.) without relying on env.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("v1.0.134 SLICE A — cross-adapter currentAttribution session DB fallback", () => {
+  test("currentAttribution falls back to session DB when CLAUDE_SESSION_ID env not set (cross-adapter)", async () => {
+    const { resolveSessionIdFromSessionDB, currentAttribution } = await import("../../src/server.js");
+    const { SessionDB, resolveSessionDbPath } = await import("../../src/session/db.js");
+
+    const sessionsDir = mkdtempSync(join(tmpdir(), "slice-a-sessions-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "slice-a-proj-"));
+    try {
+      const dbPath = resolveSessionDbPath({ projectDir, sessionsDir });
+      const expectedSid = "11111111-2222-3333-4444-555566667777";
+
+      const sdb = new SessionDB({ dbPath });
+      try {
+        sdb.ensureSession(expectedSid, projectDir);
+        sdb.insertEvent(
+          expectedSid,
+          {
+            type: "tool_use",
+            category: "file",
+            priority: 1,
+            data: "src/x.ts",
+            project_dir: projectDir,
+            attribution_source: "test",
+            attribution_confidence: 1,
+          },
+          "test",
+        );
+      } finally {
+        sdb.close();
+      }
+
+      // Ensure env path is NOT taken — both env vars unset.
+      const prevSid = process.env.CLAUDE_SESSION_ID;
+      const prevProjDir = process.env.CLAUDE_PROJECT_DIR;
+      const prevCmProjDir = process.env.OPEN_CONTEXT_MODE_PROJECT_DIR;
+      delete process.env.CLAUDE_SESSION_ID;
+      delete process.env.CLAUDE_PROJECT_DIR;
+      delete process.env.OPEN_CONTEXT_MODE_PROJECT_DIR;
+      try {
+        // bypassCache: this test runs after others may have populated the cache.
+        const sid = resolveSessionIdFromSessionDB({
+          projectDir,
+          sessionsDir,
+          bypassCache: true,
+        });
+        expect(sid).toBe(expectedSid);
+
+        // currentAttribution wraps it the same way for prod callers — when the
+        // env var is unset it must surface the DB-resolved sid via the
+        // wrapper too. We re-set OPEN_CONTEXT_MODE_PROJECT_DIR so the wrapper's
+        // own (cache-bypassed by 2s window starting fresh) call also resolves.
+        process.env.OPEN_CONTEXT_MODE_PROJECT_DIR = projectDir;
+        // Wait long enough that the previous lookup's 2s cache won't shadow
+        // the wrapper's own resolveSessionIdFromSessionDB call (env-driven path).
+        // Easier: bypass via a direct call shape — the wrapper just composes.
+        const attr = currentAttribution();
+        // Either the env-resolved path returned the same sid, or — if cache
+        // beat us — at least it's not the empty/undefined case. The hard
+        // assertion is the DB lookup above; here we only confirm the
+        // wrapper's contract (returns { sessionId } when sid resolves).
+        expect(attr?.sessionId).toBeTruthy();
+      } finally {
+        if (prevSid !== undefined) process.env.CLAUDE_SESSION_ID = prevSid;
+        if (prevProjDir !== undefined) process.env.CLAUDE_PROJECT_DIR = prevProjDir;
+        if (prevCmProjDir !== undefined) process.env.OPEN_CONTEXT_MODE_PROJECT_DIR = prevCmProjDir;
+        else delete process.env.OPEN_CONTEXT_MODE_PROJECT_DIR;
+      }
+    } finally {
+      try {
+        rmSync(sessionsDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+      try {
+        rmSync(projectDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+});
+
+test("withProjectDirOverride carries native plugin session id into currentAttribution (#574)", async () => {
+  const { withProjectDirOverride, currentAttribution } = await import("../../src/server.js");
+  const projectDir = mkdtempSync(join(tmpdir(), "native-plugin-attr-proj-"));
+  try {
+    const attr = await withProjectDirOverride({ projectDir, sessionId: "opencode-session-override" }, async () => currentAttribution());
+    expect(attr).toEqual({ sessionId: "opencode-session-override" });
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenCode/Kilo legacy MCP child suppresses open_ctx_* tool registration while embedded plugin import keeps it", async () => {
+  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
+  const legacySettings = {
+    plugin: ["open-context-mode"],
+    mcp: { "open-context-mode": { type: "local", command: ["open-context-mode"] } },
+  };
+  expect(
+    shouldSuppressMcpToolsForNativePluginHost({
+      platform: "opencode",
+      settings: legacySettings,
+    }),
+  ).toBe(true);
+  expect(
+    shouldSuppressMcpToolsForNativePluginHost({
+      platform: "kilo",
+      settings: legacySettings,
+    }),
+  ).toBe(true);
+  expect(
+    shouldSuppressMcpToolsForNativePluginHost({
+      platform: "opencode",
+      settings: { plugin: ["open-context-mode"] },
+    }),
+  ).toBe(false);
+  expect(
+    shouldSuppressMcpToolsForNativePluginHost({
+      platform: "opencode",
+      embedded: "1",
+      settings: legacySettings,
+    }),
+  ).toBe(false);
+  expect(
+    shouldSuppressMcpToolsForNativePluginHost({
+      platform: "claude-code",
+      embedded: undefined,
+    }),
+  ).toBe(false);
+});
+
+test("OpenCode legacy MCP suppression parses JSONC URLs without stripping // inside strings", async () => {
+  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "opencode-jsonc-url-"));
+  const cwd = process.cwd();
+  try {
+    writeFileSync(
+      join(dir, "opencode.jsonc"),
+      `{
+      // Keep this URL intact; a naive /\\/\\/.*/ stripper corrupts it.
+      "endpoint": "https://example.com/api",
+      "plugin": ["open-context-mode"],
+      "mcp": {
+        "open-context-mode": { "type": "local", "command": ["open-context-mode"] },
+        "other": { "type": "local", "command": ["other"] }
+      }
+    }\n`,
+    );
+    process.chdir(dir);
+    expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode" })).toBe(true);
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #787 review regression, applied to server.ts: its local stripJsonComments
+// ended with a whole-string trailing-comma regex that deleted commas INSIDE
+// string values ("[1, ]" -> "[1 ]"). That corruption always leaves the JSON
+// valid (only the comma char is deleted; the anchoring bracket stays), and
+// shouldSuppressMcpToolsForNativePluginHost() — the only public surface over
+// readNativePluginHostSettings() — checks just the plugin array for a
+// "open-context-mode" substring and the mcp object for a "open-context-mode" key, so a
+// deleted in-string comma can never flip the boolean ("open-context-mode" contains
+// no comma to delete and no bracket to leave behind). Pin the fix
+// structurally instead: server.ts must delegate to the shared string-aware
+// src/util/jsonc.ts — whose in-string-comma behavior IS pinned by the
+// "parseJsonc / stripJsonComments" suite below — and must not reintroduce a
+// local whole-string trailing-comma regex.
+test("server.ts delegates JSONC stripping to string-aware src/util/jsonc (#787 in-string trailing-comma regression)", async () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf8");
+  expect(serverSrc).toContain('from "./util/jsonc.js"');
+  expect(serverSrc).not.toContain(".replace(/,(\\s*[}\\]])/g");
+  // End-to-end sanity through the public boolean: a JSONC config that needs
+  // the strip path (comment + real trailing comma) and embeds a
+  // trailing-comma-like pattern inside a string value still parses and
+  // suppresses.
+  const { shouldSuppressMcpToolsForNativePluginHost } = await import("../../src/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "opencode-jsonc-comma-"));
+  const cwd = process.cwd();
+  try {
+    writeFileSync(
+      join(dir, "opencode.jsonc"),
+      `{
+      // forces the comment/trailing-comma strip path
+      "note": "array literal: [1, ]",
+      "plugin": ["open-context-mode"],
+      "mcp": {
+        "open-context-mode": { "type": "local", "command": ["open-context-mode"] }
+      },
+    }\n`,
+    );
+    process.chdir(dir);
+    expect(shouldSuppressMcpToolsForNativePluginHost({ platform: "opencode" })).toBe(true);
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── src/util/jsonc — shared string-aware JSONC strip/parse (#787/#806) ─────
+// The naive regex strippers that lived in src/server.ts and the OpenCode
+// adapter corrupted string VALUES: `//` inside URLs was cut as a "comment"
+// (#806), and a whole-string trailing-comma regex ate commas inside string
+// literals ("[1, ]" -> "[1 ]", the 386a196 regression). These tests pin the
+// shared util that replaced both.
+describe("parseJsonc / stripJsonComments (src/util/jsonc)", () => {
+  test("preserves // inside string values (URLs) while stripping line comments", () => {
+    const jsonc = '{\n  // strip me\n  "url": "https://mcp.context7.com/mcp"\n}';
+    expect(parseJsonc<{ url: string }>(jsonc)?.url).toBe("https://mcp.context7.com/mcp");
+    expect(stripJsonComments('{"url": "https://example.com/x"}')).toBe('{"url": "https://example.com/x"}');
+  });
+
+  test("treats // after an escaped quote as still inside the string", () => {
+    const jsonc = '{ // c\n "say": "say \\"hi\\" // not a comment" }';
+    expect(parseJsonc<{ say: string }>(jsonc)?.say).toBe('say "hi" // not a comment');
+  });
+
+  test("parses CRLF input with line comments", () => {
+    const jsonc = '{\r\n  // comment\r\n  "a": 1,\r\n  "b": 2\r\n}\r\n';
+    expect(parseJsonc(jsonc)).toEqual({ a: 1, b: 2 });
+  });
+
+  test("removes trailing commas before } and ], including whitespace/comment-separated ones", () => {
+    expect(parseJsonc('{ // c\n "a": [1, 2,], "b": { "c": 3, }, }')).toEqual({
+      a: [1, 2],
+      b: { c: 3 },
+    });
+    expect(parseJsonc('{ "a": 1, /* note */ }')).toEqual({ a: 1 });
+  });
+
+  test("strips a block comment containing a URL without touching neighbors", () => {
+    const jsonc = '{ /* see https://example.com/docs */ "a": 1, // tail\n "b": 2 }';
+    expect(parseJsonc(jsonc)).toEqual({ a: 1, b: 2 });
+  });
+
+  test("preserves a comma inside a string value (the 386a196 regression)", () => {
+    const jsonc = '{\n  // forces the strip path\n  "note": "array literal: [1, ]"\n}';
+    expect(parseJsonc<{ note: string }>(jsonc)?.note).toBe("array literal: [1, ]");
+    expect(stripJsonComments('{"a":"x, ]","b":[1,]}')).toBe('{"a":"x, ]","b":[1]}');
+  });
+
+  test("plain valid JSON passes through parseJsonc unchanged", () => {
+    const raw = '{"a": [1, 2], "u": "https://example.com", "s": "x, ]"}';
+    expect(parseJsonc(raw)).toEqual(JSON.parse(raw));
+  });
+
+  test("returns undefined when input is not JSON at all", () => {
+    expect(parseJsonc("not json at all {{")).toBeUndefined();
+  });
+});
+
+// Issue #623: when open_ctx_* tool registration is suppressed for the legacy MCP
+// child on OpenCode/Kilo, an MCP client inspecting tools/list sees an empty
+// list with NO explanation. The plugin-native tools work, but a user who only
+// observes the MCP child (or another MCP host that doesn't load the plugin)
+// has no signal that open_ctx_* tools were intentionally hidden. Surface a stderr
+// diagnostic frame at first suppressed registerTool() call so operators can
+// tell "tools/list is empty BECAUSE the legacy mcp.open-context-mode block coexists
+// with plugin: ['open-context-mode']" — not "the server is broken".
+test("OpenCode/Kilo legacy MCP child emits stderr diagnostic when open_ctx_* suppression fires (#623)", async () => {
+  const { emitSuppressionDiagnostic, __resetSuppressionDiagnosticForTests } = await import("../../src/server.js");
+  __resetSuppressionDiagnosticForTests();
+  const lines: string[] = [];
+  emitSuppressionDiagnostic({
+    platform: "opencode",
+    write: (c) => lines.push(c),
+  });
+  // Second call must NOT re-emit — diagnostic is one-shot per process.
+  emitSuppressionDiagnostic({
+    platform: "opencode",
+    write: (c) => lines.push(c),
+  });
+  const joined = lines.join("");
+  expect(joined).toMatch(/open-context-mode/);
+  expect(joined).toMatch(/#623|plugin-native|legacy.*mcp\.open-context-mode|mcp\.open-context-mode.*legacy/i);
+  // One-shot: exactly one line containing the marker.
+  const matches = joined.match(/\[open-context-mode\]/g) ?? [];
+  expect(matches.length).toBe(1);
+  __resetSuppressionDiagnosticForTests();
+});
+
+// Issue #637: an operator who inspects the suppressed legacy MCP child via
+// `tools/list` (or whose MCP host probes it on connect) currently receives a
+// JSON-RPC -32601 "Method not found" error — because no `registerTool()` call
+// survives the suppression shim, the SDK's `setToolRequestHandlers()` never
+// runs and `tools/list` is therefore unregistered. To an outside observer that
+// looks identical to a broken server and they reasonably conclude "the plugin
+// never registers any open_ctx_* tools" (#637's headline framing). The real story
+// is "the MCP child was intentionally muted; the plugin path is serving the
+// tools natively" — already conveyed via the #623 stderr diagnostic, but
+// JSON-RPC consumers don't read stderr.
+//
+// Fix: register an explicit empty `tools/list` handler whenever suppression
+// is active, so the wire response becomes `{tools: []}` (spec-compliant,
+// matches what operators expect) paired with the existing stderr diagnostic.
+// This eliminates the misleading -32601 that started #637.
+test("registerEmptyToolsListHandler responds with {tools:[]} so operators don't see -32601 on suppressed MCP child (#637)", async () => {
+  // The user-facing failure mode that drove issue #637: an operator inspecting
+  // the suppressed legacy MCP child via `tools/list` (or whose MCP host probes
+  // it during connect) receives JSON-RPC -32601 "Method not found" because the
+  // SDK only registers tools/list when `registerTool()` actually goes through —
+  // and the #623 suppression shim returns undefined for every registration.
+  // The reporter reads -32601 as "the plugin never registers any open_ctx_* tools",
+  // which is the headline framing of #637.
+  //
+  // Fix: an exported helper that installs an explicit empty tools/list handler
+  // when suppression is active. The bundle entry point calls it at module-init
+  // time (alongside the prompts/resources handlers at server.ts:259-261).
+  //
+  // We test the helper in isolation against a fresh McpServer wired through an
+  // in-memory transport to a Client. This avoids the module-load-time pinning
+  // of `suppressMcpToolsForNativePluginHost` and gives a deterministic loop
+  // that does not depend on the build bundle being present.
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { registerEmptyToolsListHandler } = await import("../../src/server.js");
+
+  const mcp = new McpServer({ name: "issue-637-isolated", version: "0.0.0" });
+  registerEmptyToolsListHandler(mcp);
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    mcp.server.connect(serverTransport),
+    (async () => {
+      const client = new Client({ name: "issue-637-probe", version: "0.0.0" }, { capabilities: {} });
+      await client.connect(clientTransport);
+      const listed = await client.listTools();
+      // Pre-fix: client.listTools() throws -32601 Method not found.
+      // Post-fix: returns { tools: [] }.
+      expect(listed).toBeDefined();
+      expect(Array.isArray(listed.tools)).toBe(true);
+      expect(listed.tools.length).toBe(0);
+      await client.close();
+    })(),
+  ]);
+}, 15_000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool description style contract (#683 ADR-0002)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Static contract test that scans every registerCtxTool() block in
+// src/server.ts and asserts the tool description meets the style policy
+// codified in docs/adr/0002-tool-description-style.md.
+//
+// Motivation: PR #654 surfaced that a single hortatory word ("blocked") in a
+// routing deny reason was misread by Opus 4.6 as a network restriction,
+// causing capitulation to training data instead of routing. The same drift
+// has accumulated organically in tool descriptions (MANDATORY:, PREFER X
+// OVER Y, NEVER, Do NOT, ✅/❌). This test is the regression guard.
+//
+// Per CONTRIBUTING.md "Test file organization", we fold the contract into
+// tests/core/server.test.ts rather than creating tests/server/*.test.ts.
+//
+// Exemptions: open_ctx_stats, open_ctx_doctor, open_ctx_insight have minimal one-line
+// descriptions by design — they are GUI/diagnostic affordances, not routing
+// targets, so the WHEN: structural requirement does not apply.
+describe("tool description style contract (#683 ADR-0002)", () => {
+  const serverTsPath = resolve(__dirname, "../../src/server.ts");
+  const serverTs = readFileSync(serverTsPath, "utf-8");
+
+  // Extract every registered tool with its description string.
+  // Description is a template literal or "+"-concatenated string literal
+  // sitting on the `description:` key inside the registerTool config object.
+  function extractToolDescriptions(): Array<{
+    name: string;
+    description: string;
+    lineNo: number;
+  }> {
+    const out: Array<{ name: string; description: string; lineNo: number }> = [];
+    const lines = serverTs.split("\n");
+    const RE_REGISTER = /registerCtxTool\(\s*$/;
+    const RE_NAME = /^\s*"(open_ctx_[a-z_]+)"\s*,\s*$/;
+    for (let i = 0; i < lines.length; i++) {
+      if (!RE_REGISTER.test(lines[i])) continue;
+      const nameMatch = lines[i + 1]?.match(RE_NAME);
+      if (!nameMatch) continue;
+      const name = nameMatch[1];
+      // Description block starts at first `description:` after the name.
+      // Capture until the next `inputSchema:` line at the same indentation.
+      let descStart = -1;
+      let descEnd = -1;
+      for (let j = i + 2; j < Math.min(i + 80, lines.length); j++) {
+        if (descStart < 0 && /^\s*description:/.test(lines[j])) {
+          descStart = j;
+        } else if (descStart >= 0 && /^\s*(inputSchema|outputSchema|annotations):/.test(lines[j])) {
+          descEnd = j;
+          break;
+        }
+      }
+      if (descStart < 0 || descEnd < 0) continue;
+      const block = lines.slice(descStart, descEnd).join("\n");
+      // Strip the leading `description: ` and trailing comma.
+      // The literal text the LLM sees is just the string content — for the
+      // contract we work on the source-form block (template-literal/concat
+      // syntax), which is sufficient to detect forbidden tokens like
+      // `MANDATORY:` or `PREFER`. We do NOT execute the template here.
+      out.push({ name, description: block, lineNo: descStart + 1 });
+    }
+    return out;
+  }
+
+  const tools = extractToolDescriptions();
+
+  // Tools exempt from the WHEN: structural requirement, with documented
+  // rationale per the audit (see TOOL-DESCRIPTIONS-AUDIT.md §3 table).
+  //
+  // - open_ctx_stats / open_ctx_doctor / open_ctx_insight: minimal one-line descriptions by
+  //   design — diagnostic/GUI affordances, not routing targets. Audit row:
+  //   "NIT — Clean, minimal, no change."
+  const EXEMPT_FROM_WHEN = new Set(["open_ctx_stats", "open_ctx_doctor", "open_ctx_insight"]);
+
+  // open_ctx_purge carve-out — the rewrite (PR #683 WS2) preserves the
+  // user-facing DESTRUCTIVE signal because Probe 4 empirically showed that
+  // soft framing regresses parameter fidelity on Haiku (5/5 → 3/5). The
+  // word "DESTRUCTIVE" is therefore an accurate-signaling carve-out,
+  // distinct from cross-LLM-bias negative framing the rubric forbids.
+  // ADR-0002 §Exemptions documents this; the WHEN/WHEN NOT/SCOPES/
+  // CONTRACT/RETURNS/EXAMPLE structure of the rewritten description still
+  // meets the canonical contract enforced below.
+  const EXEMPT_FROM_FORBIDDEN_TOKENS = new Set<string>([]);
+
+  test("at least 10 open_ctx_* tools are registered", () => {
+    // Sanity check that the extractor found the corpus.
+    expect(tools.length).toBeGreaterThanOrEqual(10);
+  });
+
+  // Forbidden tokens per ADR-0002. Each pattern is documented inline so
+  // a future contributor reading a failure understands the rationale, not
+  // just the regex.
+  type ForbiddenRule = { name: string; pattern: RegExp; rationale: string };
+  const FORBIDDEN: ForbiddenRule[] = [
+    {
+      name: "SESSION STATE clause",
+      // Rubric #3 + GRILL-Q1-VERDICT: tool descriptions are selection cues,
+      // not in-context prompts. Skill/role/decision persistence belongs in
+      // routing-block.mjs (which already covers it more thoroughly).
+      pattern: /\bSESSION STATE\b/,
+      rationale: "Move SESSION STATE guidance to routing-block.mjs (it already lives there).",
+    },
+    {
+      name: "BLOCKED",
+      // ADR-0003: 'blocked' is reserved for CASE B (real policy restriction)
+      // in routing.mjs deny reasons. It MUST NOT appear in any open_ctx_* tool
+      // description, where there is no security restriction to express.
+      pattern: /\bBLOCKED\b/,
+      rationale: "Reserve 'blocked' for routing CASE B (security policy denial) per ADR-0003.",
+    },
+    {
+      name: "MANDATORY: opener",
+      // Rubric #7: MANDATORY in a tool description reads as a developer
+      // policy note rather than a tool-selection cue. Replace with WHEN:.
+      pattern: /\bMANDATORY:/,
+      rationale: "Replace 'MANDATORY:' opener with role definition + WHEN: section.",
+    },
+    {
+      name: "PREFER X OVER Y",
+      // Rubric #7: 'PREFER' is the wrong strength and frames the choice as
+      // a tradeoff. WHEN:/WHEN NOT: sections give the agent positive cues.
+      pattern: /\bPREFER\s+THIS\s+OVER\b/,
+      rationale: "Replace 'PREFER THIS OVER X' with positive WHEN: clauses.",
+    },
+    {
+      name: "Do NOT (descriptive)",
+      // Rubric #2 + #7: affirmative beats negative. 'Do NOT' inside the
+      // description is voice-of-trainer; routing-block.mjs is the right
+      // layer for prohibitions.
+      pattern: /\bDo NOT\s+(?:read|use|pull|call)\b/,
+      rationale: "Rewrite 'Do NOT read/use/pull' as positive WHEN: / WHEN NOT: clauses.",
+    },
+    {
+      name: "Never use (capitalised imperative)",
+      // Rubric #7: 'Never' as a soft imperative inside a description is
+      // a forbidding voice; sibling-tool selection should be expressed
+      // through WHEN NOT: structure instead.
+      pattern: /\bNever\s+use\b/,
+      rationale: "Rewrite 'Never use' as positive WHEN NOT: clause.",
+    },
+    {
+      name: "checkmark emoji ✅",
+      // Rubric #4 + Probe 3 evidence: emoji tokenize inconsistently across
+      // LLM families (Llama, Gemini) and ❌ bullets are precisely the
+      // negative-example leakage pattern.
+      pattern: /✅/,
+      rationale: "Replace ✅ bullets with prose 'USE concurrency 4-8 for ...' (ADR-0002).",
+    },
+    {
+      name: "cross emoji ❌",
+      pattern: /❌/,
+      rationale: "Replace ❌ bullets with prose 'KEEP concurrency 1 for ...' (ADR-0002).",
+    },
+  ];
+
+  // ── Canonical structure (ADR-0002 amendment, PR #683 WS3) ────────────
+  //
+  // Every non-exempt open_ctx_* tool description MUST follow the canonical
+  // structure documented in ADR-0002:
+  //
+  //   <1-line headline>
+  //   WHEN:        (mandatory — positive selection cues, bulleted with `- `)
+  //   WHEN NOT:    (optional — sibling-tool disambiguation, bulleted)
+  //   RETURNS:     (mandatory — what the agent gets back)
+  //   EXAMPLE:     (mandatory — one canonical call)
+  //
+  // Rules:
+  //   1. Section order MUST be WHEN -> WHEN NOT -> RETURNS -> EXAMPLE
+  //      (positive cues precede negative disambiguation, per audit rubric #2).
+  //   2. Bullets MUST use markdown `- ` only. `1.`, `1-`, `* `, and `•` are
+  //      rejected because they tokenize inconsistently across LLM families
+  //      and break the audit's bullet-uniformity contract.
+  //   3. Section headers MUST be UPPERCASE + colon at the start of a line
+  //      (after the `\n` escape in source form).
+  //   4. open_ctx_purge has an audit-approved carve-out for DESTRUCTIVE / SCOPES /
+  //      CONTRACT headers (accurate-signaling and parameter-fidelity
+  //      requirements that Probe 4 empirically validated). All four headers
+  //      coexist with the canonical WHEN/WHEN NOT/RETURNS/EXAMPLE.
+  //
+  // Helper: flatten the source-form description into the literal text the
+  // LLM eventually sees (collapse `\n` escapes, join `"..." + "..."` concat,
+  // strip template-literal backticks). This is the same shape the host LLM
+  // receives at tool-selection time.
+  function flattenDescription(d: string): string {
+    return d
+      .replace(/^\s*description:\s*/, "")
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, '"')
+      .replace(/"\s*\+\s*\n\s*"/g, "")
+      .replace(/"\s*\+\s*"/g, "")
+      .replace(/^"|"$/gm, "")
+      .replace(/`/g, "");
+  }
+
+  // Per-tool carve-outs that allow non-canonical UPPERCASE: section headers.
+  // Each entry is justified inline so a future contributor reading a failure
+  // understands why the carve-out exists.
+  const ALLOWED_EXTRA_SECTIONS: Record<string, string[]> = {
+    // open_ctx_purge: heavy framing is empirically validated by Probe 4. The
+    // DESTRUCTIVE prefix preserves accurate user-facing signaling and
+    // SCOPES/CONTRACT preserve parameter-fidelity discipline on Haiku.
+    open_ctx_purge: ["DESTRUCTIVE", "SCOPES", "CONTRACT"],
+  };
+
+  // Canonical mandatory + optional sections.
+  const CANONICAL_ORDER = ["WHEN", "WHEN NOT", "RETURNS", "EXAMPLE"] as const;
+  const MANDATORY = ["WHEN", "RETURNS", "EXAMPLE"] as const;
+
+  // Bullet patterns the contract rejects in routing-target descriptions.
+  const BAD_BULLETS = [
+    { name: "numeric-dot bullet (e.g. '1.')", pattern: /^\s*\d+\.\s/m },
+    { name: "numeric-dash bullet (e.g. '1-')", pattern: /^\s*\d+-\s/m },
+    { name: "asterisk bullet (e.g. '* foo')", pattern: /^\s*\*\s/m },
+    { name: "unicode bullet (e.g. '• foo')", pattern: /^\s*•\s/m },
+  ];
+
+  for (const tool of tools) {
+    // Tools exempt from BOTH groups have no assertions to make — emit a
+    // placeholder test so vitest doesn't error on empty describe blocks.
+    const isFullyExempt = EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name) && EXEMPT_FROM_WHEN.has(tool.name);
+    describe(tool.name, () => {
+      if (isFullyExempt) {
+        test("deferred to follow-up PR (see EXEMPT_FROM_FORBIDDEN_TOKENS rationale)", () => {
+          expect(EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name)).toBe(true);
+        });
+        return;
+      }
+      if (!EXEMPT_FROM_FORBIDDEN_TOKENS.has(tool.name)) {
+        for (const rule of FORBIDDEN) {
+          test(`MUST NOT contain '${rule.name}'`, () => {
+            const match = tool.description.match(rule.pattern);
+            if (match) {
+              throw new Error(
+                `${tool.name} description (src/server.ts:${tool.lineNo}) contains forbidden token '${match[0]}' ` +
+                  `(rule: ${rule.name}). ${rule.rationale}`,
+              );
+            }
+          });
+        }
+      }
+
+      if (!EXEMPT_FROM_WHEN.has(tool.name)) {
+        test("MUST contain a WHEN: section (or WHEN TO USE: legacy)", () => {
+          // Per ADR-0002: every routing-target open_ctx_* tool MUST have a
+          // positive selection cue. The legacy alias `WHEN TO USE:` is
+          // accepted because open_ctx_index already uses it and rewriting that
+          // header is out of scope for this PR (audit MEDIUM, separate work).
+          //
+          // We can't use `\bWHEN` because in source-form descriptions the
+          // preceding token is often the literal two-char sequence `\n`
+          // (from the JS escape) — `n` is a word character so `\b` fails.
+          // Likewise, for `+ "WHEN:..."` concat style the preceding char is
+          // `"`. Match any of those legitimate prefixes explicitly so both
+          // template-literal and string-concat description shapes pass.
+          const hasWhen = /(?:\\n|^|\s|")WHEN(?:\s+TO\s+USE)?:/.test(tool.description);
+          expect(hasWhen, `${tool.name} description (src/server.ts:${tool.lineNo}) must contain a WHEN: section`).toBe(true);
+        });
+
+        // ── Canonical structure assertions (PR #683 WS3) ─────────────
+        const flat = flattenDescription(tool.description);
+
+        test("MUST contain RETURNS: and EXAMPLE: sections (canonical structure)", () => {
+          for (const section of MANDATORY) {
+            expect(
+              flat.includes(section + ":"),
+              `${tool.name} (src/server.ts:${tool.lineNo}) missing mandatory section '${section}:' per ADR-0002 canonical structure.`,
+            ).toBe(true);
+          }
+        });
+
+        test("section order MUST be WHEN -> WHEN NOT -> RETURNS -> EXAMPLE", () => {
+          // For each canonical section present, its position in the flattened
+          // description must be strictly greater than the previous canonical
+          // section's position. Carve-out headers (DESTRUCTIVE, SCOPES,
+          // CONTRACT for open_ctx_purge) are allowed between canonical sections
+          // — only the relative order of the canonical four is enforced.
+          let lastPos = -1;
+          for (const section of CANONICAL_ORDER) {
+            const pos = flat.indexOf(section + ":");
+            if (pos < 0) continue;
+            expect(
+              pos,
+              `${tool.name} (src/server.ts:${tool.lineNo}) section '${section}:' appears before a sibling that should follow it (positions: ${CANONICAL_ORDER.map((s) => `${s}=${flat.indexOf(s + ":")}`).join(", ")}). Canonical order: WHEN -> WHEN NOT -> RETURNS -> EXAMPLE.`,
+            ).toBeGreaterThan(lastPos);
+            lastPos = pos;
+          }
+        });
+
+        test("section headers MUST be UPPERCASE + colon (no off-spec UPPERCASE sections)", () => {
+          // Extract every UPPERCASE-header occurrence (two or more uppercase
+          // chars, optional space, then colon at line start). Reject any
+          // that aren't in the canonical set or the per-tool carve-out.
+          const headerMatches = [...flat.matchAll(/^([A-Z][A-Z _]+):/gm)].map((m) => m[1]);
+          const allowed = new Set<string>([...CANONICAL_ORDER, ...(ALLOWED_EXTRA_SECTIONS[tool.name] ?? [])]);
+          const offSpec = [...new Set(headerMatches.filter((h) => !allowed.has(h)))];
+          expect(
+            offSpec,
+            `${tool.name} (src/server.ts:${tool.lineNo}) uses off-spec UPPERCASE sections [${offSpec.join(", ")}]. ` +
+              `Allowed: [${[...allowed].join(", ")}]. Fold operational sub-guidance (CONCURRENCY, TIPS, ...) into WHEN: / RETURNS: prose.`,
+          ).toEqual([]);
+        });
+
+        test("bullets MUST use '- ' markdown only (no '1.', '1-', '* ', or '•')", () => {
+          // Scan the flattened description. The rubric requires uniform
+          // markdown bullets so the host LLM tokenizes them consistently
+          // across Claude / GPT / Gemini / Llama. Numbered ordering inside
+          // a routing-target description is also discouraged because each
+          // bullet should be independently true, not sequenced.
+          const failures: string[] = [];
+          for (const rule of BAD_BULLETS) {
+            const m = flat.match(rule.pattern);
+            if (m) {
+              const lineNo = flat.slice(0, flat.indexOf(m[0])).split("\n").length;
+              failures.push(`${rule.name} at description-line ${lineNo}: '${m[0].trim()}'`);
+            }
+          }
+          expect(
+            failures,
+            `${tool.name} (src/server.ts:${tool.lineNo}) bullet uniformity violation: ${failures.join("; ")}. ` +
+              `Use markdown '- ' bullets only (ADR-0002 §Canonical structure).`,
+          ).toEqual([]);
+        });
+
+        // ── PR #683 second amendment (Mert flag): RETURNS form uniformity ──
+        //
+        // ADR-0002 L56-57 specifies RETURNS as a header on its own line with
+        // the body on the next line indented (matching WHEN: / WHEN NOT:
+        // shape). Three tools (open_ctx_execute, open_ctx_execute_file, open_ctx_purge)
+        // historically used inline form ("RETURNS: only your printed output.")
+        // while four tools (open_ctx_index, open_ctx_search, open_ctx_fetch_and_index,
+        // open_ctx_batch_execute) used the canonical header+body form. Mert flagged
+        // the visual inconsistency on review. This guard locks the canonical
+        // form so the regression can't slip back.
+        //
+        // EXAMPLE: stays inline per ADR-0002 L59 ("EXAMPLE: <one canonical
+        // call>"). The asymmetry is intentional — RETURNS prose is multi-line
+        // capable, EXAMPLE values are one-call-per-line.
+        test("RETURNS: header MUST be on its own line, body indented below (ADR-0002 L56-57)", () => {
+          // Match RETURNS: followed by anything other than \n on the same
+          // line (treating \\n source escape as the same boundary as a real
+          // newline). Inline form like "RETURNS: only your printed output."
+          // fails; header+body form like "RETURNS:\n  Only your printed
+          // output." passes.
+          //
+          // Source descriptions live either as template literals with real
+          // newlines OR as `+ "...\n"` concat strings with escape sequences.
+          // Match both shapes via a non-newline-non-backslash assertion.
+          const inlineRe = /RETURNS:[ \t]+[^\n\\]/;
+          const m = tool.description.match(inlineRe);
+          expect(
+            m,
+            m
+              ? `${tool.name} (src/server.ts:${tool.lineNo}) uses inline RETURNS form: '${m[0]}…'. ` +
+                  `ADR-0002 L56-57 requires header on its own line with body indented below. ` +
+                  `Rewrite as 'RETURNS:\\n  <body>'.`
+              : "RETURNS: header on own line.",
+          ).toBeNull();
+        });
+
+        // ADR-0002 L163 "Length": SHOULD be <= 1,000 characters, hard cap
+        // 1,500. Nothing enforced it, so six descriptions had drifted to
+        // 2-3x the cap. These strings ride in the tool surface of EVERY
+        // request, so the overage recurs per request instead of being a
+        // one-time authoring artifact.
+        //
+        // Measured with flattenDescription above, so it is the source-form
+        // length. Interpolated values (langList, bunNote) count as one char
+        // here and render as a short list, so this is a conservative bound.
+        test("MUST be <= 1,500 chars (ADR-0002 hard cap)", () => {
+          const length = flattenDescription(tool.description).trim().length;
+          expect(
+            length,
+            `${tool.name} description (src/server.ts:${tool.lineNo}) is ${length} chars, over the ` +
+              `1,500 hard cap in ADR-0002 L163. Cut prose, not selection cues: implementation ` +
+              `detail (matcher internals, caching mechanics, latency math) and surplus EXAMPLES go ` +
+              `first - the WHEN:/WHEN NOT: bullets are the routing contract.`,
+          ).toBeLessThanOrEqual(1500);
+        });
+      }
+    });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003 extension)
+//
+// `src/server.ts` carries the MCP tool-description surface (read by host
+// LLMs at tool-selection time). The hook routing layer carries TWO MORE
+// agent-facing prompt surfaces that share the same cross-LLM safety bias
+// concerns (rubric #9):
+//
+//   1. `hooks/routing-block.mjs` — system-prompt injection text shipped on
+//      every SessionStart and every routing redirect. Lives in 100% of
+//      sessions; higher blast radius than any single tool description.
+//   2. `hooks/core/routing.mjs` — runtime deny-reason strings shown to the
+//      agent when a Bash / Read / Grep / WebFetch call is intercepted.
+//      ADR-0003 distinguishes:
+//        - CASE A (routing redirect — alternative tool exists for
+//          context-window or efficiency reasons) → MUST use "redirected"
+//          opener, MUST NOT use bare "BLOCKED".
+//        - CASE B (true security / policy restriction) → "blocked by
+//          security policy" + matched pattern is correct and expected.
+//
+// This block extends the ADR-0002 forbidden-token contract above to both
+// surfaces, plus enforces ADR-0003 CASE A wording requirements on every
+// `action: "deny"` / redirect-emitting branch in `routing.mjs`.
+//
+// One contract test, three prompt surfaces. Single regression guard.
+// ──────────────────────────────────────────────────────────────────────────
+describe("hook routing prompt-surface contract (#683 ADR-0002 + ADR-0003)", () => {
+  const routingMjsPath = resolve(__dirname, "../../hooks/core/routing.mjs");
+  const routingBlockMjsPath = resolve(__dirname, "../../hooks/routing-block.mjs");
+  const routingMjs = readFileSync(routingMjsPath, "utf-8");
+  const routingBlockMjs = readFileSync(routingBlockMjsPath, "utf-8");
+
+  // Forbidden tokens that apply to BOTH hook prompt surfaces. These are
+  // a strict superset of the ADR-0002 open_ctx_* description rules above
+  // because routing.mjs deny reasons and routing-block.mjs guidance run
+  // as system-prompt injection — exactly the layer where Constitutional AI
+  // safety priors fire most aggressively (rubric #9).
+  //
+  // Each pattern is documented inline so a future contributor reading a
+  // failure understands the rationale, not just the regex.
+  type SurfaceRule = { name: string; pattern: RegExp; rationale: string };
+  const SURFACE_FORBIDDEN: SurfaceRule[] = [
+    {
+      name: "<forbidden_actions> XML container",
+      // Rubric #9: the container name itself is a Constitutional AI
+      // trigger. Anthropic-tier models are RLHF'd to handle anything
+      // tagged "forbidden" with extra caution, which inverts the intent
+      // (the agent should follow the directive, not refuse it).
+      // Reframe positively as <when_not_to_use> or fold into the
+      // affirmative hierarchy.
+      pattern: /<forbidden_actions>/,
+      rationale: "Rename to <when_not_to_use> or fold into positive hierarchy (rubric #2 + #9).",
+    },
+    {
+      name: "NEVER (uppercase imperative)",
+      // Rubric #2 + #7: smaller / cross-family models fixate on the
+      // forbidden token (ironic process theory). Use ALWAYS / WHEN NOT
+      // structure instead.
+      pattern: /\bNEVER\b/,
+      rationale: "Rewrite uppercase NEVER as ALWAYS / WHEN NOT / positive directive.",
+    },
+    {
+      name: "FORBIDDEN (capital banner)",
+      // Same rubric. Pure negative banner with no positive counterpart
+      // is the highest-risk framing under Constitutional AI priors.
+      pattern: /\bFORBIDDEN\b/,
+      rationale: "Avoid 'FORBIDDEN' banner; express as positive WHEN: cues.",
+    },
+    {
+      name: "NO X for Y bullet",
+      // Rubric #2: bullet-list negatives anchor the agent's attention
+      // on the prohibited action. Convert each bullet to "Use Y for X"
+      // (affirmative redirect).
+      pattern: /^\s*-\s*NO\s+(Bash|Read|Grep|WebFetch|open_ctx_)/m,
+      rationale: "Convert 'NO X for Y' bullets to positive 'Use Y for X' redirects.",
+    },
+  ];
+
+  test("hooks/routing-block.mjs MUST NOT contain forbidden tokens", () => {
+    const failures: string[] = [];
+    for (const rule of SURFACE_FORBIDDEN) {
+      const m = routingBlockMjs.match(rule.pattern);
+      if (m) {
+        const lineNo = routingBlockMjs.slice(0, m.index ?? 0).split("\n").length;
+        failures.push(`hooks/routing-block.mjs:${lineNo} contains forbidden token '${m[0]}' ` + `(rule: ${rule.name}). ${rule.rationale}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test("hooks/core/routing.mjs MUST NOT contain forbidden tokens", () => {
+    const failures: string[] = [];
+    for (const rule of SURFACE_FORBIDDEN) {
+      const m = routingMjs.match(rule.pattern);
+      if (m) {
+        const lineNo = routingMjs.slice(0, m.index ?? 0).split("\n").length;
+        failures.push(`hooks/core/routing.mjs:${lineNo} contains forbidden token '${m[0]}' ` + `(rule: ${rule.name}). ${rule.rationale}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // ── ADR-0003 enforcement on routing.mjs deny / redirect strings ──
+  //
+  // Mechanically: any string literal that the agent sees as a redirect
+  // explanation (curl/wget, inline HTTP, build tools, WebFetch) is CASE A.
+  // ADR-0003 CASE A REQUIRES:
+  //   - Opens with the verb "redirected"
+  //   - MUST NOT contain the bare uppercase token "BLOCKED" (reserved for
+  //     CASE B — see `Blocked by security policy: …` form)
+  //   - MUST name the alternative open_ctx_* tool the agent should use
+  //
+  // CASE B (security policy) strings live in the same file and use the
+  // form `Blocked by security policy: matches deny pattern <pat>`. Those
+  // are correct AS-IS — the test only enforces CASE A on CASE A strings.
+  //
+  // Detection heuristic: a string-literal segment that contains "redirected"
+  // is CASE A. A string segment that contains "Blocked by security policy"
+  // is CASE B (exempt). String segments are extracted naively from the
+  // source by walking forward from each return statement and capturing the
+  // template-literal payload up to the closing backtick — sufficient for
+  // the four current call sites (L707, L738, L751, L804) and any future
+  // ones a contributor adds.
+  describe("ADR-0003 CASE A: routing.mjs redirect deny reasons", () => {
+    type CaseAString = { lineNo: number; payload: string };
+
+    function extractCaseAStrings(src: string): CaseAString[] {
+      const lines = src.split("\n");
+      const out: CaseAString[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i];
+        // Skip comments — both single-line // and JSDoc * lines that mention
+        // 'redirected' as documentation of the routing case, not as a deny
+        // payload. The real CASE A payloads live inside template literals
+        // passed to the builder calls.
+        const trimmed = ln.replace(/^\s+/, "");
+        if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
+        // C7: routing.mjs builds CASE A wording through the ADR-0003
+        // builders in src/security.ts (shipped as hooks/security.bundle.mjs).
+        // The "redirected" envelope now lives in the builder — asserted on
+        // builder OUTPUT in the code-enforced describe below — while the
+        // body (which must name a open_ctx_* tool and carry no banned negations)
+        // is still a template literal at each call site. CASE B sites call
+        // denyPatternReason(...) and are excluded (asserted separately).
+        if (/\bredirect(?:To)?Reason\s*\(/.test(ln)) {
+          // Statement window: the call plus the literal body that follows
+          // (bodies are single template literals spanning a few lines).
+          out.push({ lineNo: i + 1, payload: lines.slice(i, i + 8).join("\n") });
+        }
+      }
+      return out;
+    }
+
+    const caseAs = extractCaseAStrings(routingMjs);
+
+    test("at least 4 CASE A redirect call sites present (sanity check on extractor)", () => {
+      // Current corpus: curl/wget, inline HTTP, build tools, WebFetch
+      // (subject-form) + the tool-first Codex home search. If a contributor
+      // removes one, the count drops and this sanity check forces the test
+      // author to revisit the extractor.
+      expect(caseAs.length).toBeGreaterThanOrEqual(4);
+    });
+
+    for (const cs of caseAs) {
+      describe(`hooks/core/routing.mjs:${cs.lineNo}`, () => {
+        test("MUST NOT contain bare uppercase BLOCKED (reserved for CASE B)", () => {
+          // ADR-0003: CASE A strings MUST NOT borrow CASE B vocabulary.
+          // Lowercase `block` (e.g. `blockchain`) is fine; uppercase BLOCKED
+          // is the Constitutional AI trigger.
+          expect(cs.payload).not.toMatch(/\bBLOCKED\b/);
+        });
+
+        test("MUST name at least one open_ctx_* alternative tool", () => {
+          // ADR-0003 §CASE A: "MUST specify the alternative tool to use."
+          // Every routing call site names open_ctx_execute and/or
+          // open_ctx_fetch_and_index — we just enforce that SOMETHING open_ctx_*
+          // is mentioned so the agent has a concrete next call.
+          expect(cs.payload).toMatch(/open_ctx_(execute|fetch_and_index|search|batch_execute)/);
+        });
+
+        // ── PR #683 follow-up (Mert flag): negation-pattern eradication ──
+        //
+        // The original PR #654 fix replaced the single word "blocked" with
+        // "redirected", which removed the Constitutional-AI safety trigger but
+        // kept a sibling rubric #2 violation in the very next clause:
+        //
+        //   "(context-window optimization, NOT a network restriction)"
+        //
+        // The audit (TOOL-DESCRIPTIONS-AUDIT.md §2 Probe 3) measured this
+        // parenthetical regressing Haiku capitulation from 0/6 → 2/6 — the
+        // bare-NOT construct primes the very frame it tries to deny (ironic
+        // process theory). Per ADR-0002 rubric #2 (affirmative beats negative),
+        // CASE A strings MUST avoid bare-NOT negations entirely. Reframe with
+        // affirmative "X has full network access" + imperative retry hint.
+        test("MUST NOT contain the 'NOT a network' negation (PR #683 follow-up)", () => {
+          // Matches "NOT a network restriction", "NOT a network/security
+          // restriction", "is NOT a network ...", etc. Affirmative-only voice.
+          expect(cs.payload).not.toMatch(/\bNOT\s+a\s+network\b/i);
+        });
+
+        test("MUST NOT contain 'Do NOT retry' negation (PR #683 follow-up)", () => {
+          // Same rubric: "Do NOT retry with curl/wget" anchors attention on
+          // the disallowed action. Express as the positive next step — the
+          // open_ctx_execute / open_ctx_fetch_and_index call IS the next step.
+          expect(cs.payload).not.toMatch(/\bDo\s+NOT\s+retry\b/i);
+        });
+
+        // ── PR #683 second amendment (Mert flag): no org-rationale preface ──
+        //
+        // The first amendment replaced the bare-NOT parenthetical with the
+        // affirmative-voice opening "redirected to <open_ctx_tool> for context-window
+        // efficiency". Mert's second-pass flag: the "for X reason" preface is
+        // org-rationale, not action input. The agent's job is to (a) make the
+        // correct next call, (b) know it has the capability, (c) know when to
+        // retry — not to audit policy. The capability affirmation
+        // "<open_ctx_tool> has full network access" already carries the substantive
+        // signal the rationale was double-encoding. ADR-0003 §Second amendment.
+        //
+        // Compare HTTP 301: the response carries "Location: <new-url>" and the
+        // client uses it. The server never appends "for SEO efficiency".
+        test("MUST NOT contain 'for context-window efficiency' org-rationale (PR #683 second amendment)", () => {
+          expect(cs.payload).not.toMatch(/\bfor\s+context-window\s+(efficiency|optimization)\b/i);
+        });
+      });
+    }
+  });
+
+  // ── C7: ADR-0003 as a code-enforced contract on builder OUTPUT ──
+  //
+  // Until C7 the rubric above was doc-enforced against routing.mjs source
+  // literals. The wording now lives in src/security.ts builders (shipped to
+  // the .mjs island as hooks/security.bundle.mjs and imported by TS
+  // producers directly), so the rule is enforced where it is defined: on
+  // builder output. routing.mjs/server.ts emit byte-identical strings
+  // through these builders (zero behavior change there); the omp/pi
+  // adapters were re-worded onto builder output, which is what removed
+  // their legacy "NOT available" negations.
+  describe("ADR-0003 reason builders (code-enforced, C7)", () => {
+    const CASE_A_SAMPLES: Array<{ name: string; reason: string }> = [
+      {
+        name: "redirectReason — network shape (curl/wget / WebFetch family)",
+        reason: redirectReason(
+          "WebFetch",
+          'Call open_ctx_fetch_and_index(url: "https://example.com", source: "...") to fetch + index the page. Both have full network access. Retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT, ENETUNREACH).',
+        ),
+      },
+      {
+        name: "redirectReason — filesystem shape (build tool family)",
+        reason: redirectReason(
+          "Build tool",
+          'Call open_ctx_execute(language: "shell", code: "gradle build 2>&1 | tail -30") to run the build and print only the tail.',
+        ),
+      },
+      {
+        name: "redirectReason — adapter shape (omp/pi inline HTTP)",
+        reason: redirectReason(
+          "inline HTTP",
+          "Call open_ctx_execute(language, code) or open_ctx_fetch_and_index(url, source) — both have full network access.",
+        ),
+      },
+      {
+        name: "redirectToReason — tool-first shape (codex home search)",
+        reason: redirectToReason(
+          "open_ctx_execute",
+          "a bounded Codex home search",
+          "open_ctx_execute has full filesystem access within the host permission model. Retry the same search on a transient filesystem error (EBUSY, EMFILE, ENFILE).",
+        ),
+      },
+    ];
+
+    for (const sample of CASE_A_SAMPLES) {
+      describe(sample.name, () => {
+        test("opens with 'open-context-mode: ' + the verb 'redirected' (CASE A wording)", () => {
+          expect(sample.reason).toMatch(/^open-context-mode: .*redirected/);
+        });
+
+        test("MUST NOT contain bare uppercase BLOCKED (reserved for CASE B)", () => {
+          expect(sample.reason).not.toMatch(/\bBLOCKED\b/);
+        });
+
+        test("names a open_ctx_* alternative tool (caller body contract)", () => {
+          expect(sample.reason).toMatch(/open_ctx_(execute|fetch_and_index|search|batch_execute)/);
+        });
+
+        test("MUST NOT contain the 'NOT a network' negation (PR #683 follow-up)", () => {
+          expect(sample.reason).not.toMatch(/\bNOT\s+a\s+network\b/i);
+        });
+
+        test("MUST NOT contain 'Do NOT retry' negation (PR #683 follow-up)", () => {
+          expect(sample.reason).not.toMatch(/\bDo\s+NOT\s+retry\b/i);
+        });
+
+        test("MUST NOT contain 'for context-window efficiency' org-rationale (PR #683 second amendment)", () => {
+          expect(sample.reason).not.toMatch(/\bfor\s+context-window\s+(efficiency|optimization)\b/i);
+        });
+      });
+    }
+
+    // CASE B keeps the "blocked by security policy" shape — byte-identical
+    // to the pre-C7 literals of routing.mjs and src/server.ts. These exact
+    // equalities ARE the zero-behavior-change contract for the byte-stable
+    // surfaces; if one fails, a producer's wording drifted.
+    describe("CASE B denyPatternReason keeps the blocked shape, byte-identically", () => {
+      test("routing.mjs Bash deny", () => {
+        expect(denyPatternReason({ pattern: "Bash(sudo *)" })).toBe("Blocked by security policy: matches deny pattern Bash(sudo *)");
+      });
+
+      test("routing.mjs open_ctx_execute / open_ctx_execute_file shell-code deny", () => {
+        expect(denyPatternReason({ subject: "shell code", pattern: "Bash(rm *)" })).toBe(
+          "Blocked by security policy: shell code matches deny pattern Bash(rm *)",
+        );
+      });
+
+      test("routing.mjs open_ctx_execute_file path deny", () => {
+        expect(denyPatternReason({ subject: "file path", read: true, pattern: "Read(.env)" })).toBe(
+          "Blocked by security policy: file path matches Read deny pattern Read(.env)",
+        );
+      });
+
+      test("routing.mjs open_ctx_batch_execute deny", () => {
+        expect(denyPatternReason({ subject: 'batch command "build"', pattern: "Bash(sudo *)" })).toBe(
+          'Blocked by security policy: batch command "build" matches deny pattern Bash(sudo *)',
+        );
+      });
+
+      test("server.ts Bash deny", () => {
+        expect(denyPatternReason({ lead: "Command", pattern: "Bash(sudo *)" })).toBe(
+          "Command blocked by security policy: matches deny pattern Bash(sudo *)",
+        );
+      });
+
+      test("server.ts non-shell embedded-command deny", () => {
+        expect(denyPatternReason({ lead: "Command", subject: 'embedded shell command "rm -rf /"', pattern: "Bash(rm *)" })).toBe(
+          'Command blocked by security policy: embedded shell command "rm -rf /" matches deny pattern Bash(rm *)',
+        );
+      });
+
+      test("server.ts Read-path deny", () => {
+        expect(denyPatternReason({ lead: "File access", subject: "path", read: true, pattern: "Read(.env)" })).toBe(
+          "File access blocked by security policy: path matches Read deny pattern Read(.env)",
+        );
+      });
+    });
+
+    test("CASE B failClosedReason cites the gate and the remediation (#468)", () => {
+      const reason = failClosedReason();
+      expect(reason).toMatch(/fail-closed engaged/);
+      expect(reason).toMatch(/OPEN_CONTEXT_MODE_REQUIRE_SECURITY=1/);
+      expect(reason).toMatch(/npm run build/);
+    });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// PR #683 follow-up (Mert flag, 2026-05-24): tool description source-form
+// uniformity — embedded `\n\n` escapes in template literals
+//
+// open_ctx_execute was the lone open_ctx_* tool whose description used a template
+// literal with embedded `\n\n` escape sequences inline (compact but
+// escape-heavy and harder to scan). Every other multi-section open_ctx_*
+// description used `"..." + "...\n\n"` concat-form. Both render identically
+// to the host LLM — the bytes are the same `\n\n` separators — but the
+// source form was inconsistent.
+//
+// Canonical decision (ADR-0002 follow-up): template literal with REAL
+// newlines. Source mirrors the rendered prompt. Zero escape sequences.
+// Markdown-friendly when read in an editor. The contract test below locks
+// the decision so a future contributor can't slip back to either of the
+// rejected forms (embedded `\n\n` escapes OR multi-line string concat).
+// ──────────────────────────────────────────────────────────────────────────
+describe("tool description source form contract (#683 PR follow-up)", () => {
+  const serverTsPath = resolve(__dirname, "../../src/server.ts");
+  const serverTs = readFileSync(serverTsPath, "utf-8");
+
+  // Locate every `description: ...,` block under a registerCtxTool() call
+  // and capture its raw source text. Reuse the same anchor pattern as the
+  // ADR-0002 contract test for consistency.
+  function extractDescriptionBlocks(): Array<{
+    name: string;
+    raw: string;
+    lineNo: number;
+  }> {
+    const out: Array<{ name: string; raw: string; lineNo: number }> = [];
+    const lines = serverTs.split("\n");
+    const RE_REGISTER = /registerCtxTool\(\s*$/;
+    const RE_NAME = /^\s*"(open_ctx_[a-z_]+)"\s*,\s*$/;
+    for (let i = 0; i < lines.length; i++) {
+      if (!RE_REGISTER.test(lines[i])) continue;
+      const nameMatch = lines[i + 1]?.match(RE_NAME);
+      if (!nameMatch) continue;
+      const name = nameMatch[1];
+      let descStart = -1;
+      let descEnd = -1;
+      for (let j = i + 2; j < Math.min(i + 80, lines.length); j++) {
+        if (descStart < 0 && /^\s*description:/.test(lines[j])) {
+          descStart = j;
+        } else if (descStart >= 0 && /^\s*(inputSchema|outputSchema|annotations):/.test(lines[j])) {
+          descEnd = j;
+          break;
+        }
+      }
+      if (descStart < 0 || descEnd < 0) continue;
+      out.push({
+        name,
+        raw: lines.slice(descStart, descEnd).join("\n"),
+        lineNo: descStart + 1,
+      });
+    }
+    return out;
+  }
+
+  const blocks = extractDescriptionBlocks();
+
+  // Tools whose descriptions are intentionally one-line concats with no
+  // section structure (diagnostic / GUI affordances per ADR-0002
+  // §Exemptions). They carry no `\n` separators in the source at all, so
+  // the embedded-escape rule is trivially satisfied and the concat-form
+  // exemption applies. Future contributors can promote these to template
+  // literals at will; they just aren't forced to.
+  const SHORT_DESCRIPTION_EXEMPT = new Set(["open_ctx_stats", "open_ctx_doctor", "open_ctx_insight"]);
+
+  test("at least 10 open_ctx_* tools surfaced for source-form contract", () => {
+    expect(blocks.length).toBeGreaterThanOrEqual(10);
+  });
+
+  for (const block of blocks) {
+    if (SHORT_DESCRIPTION_EXEMPT.has(block.name)) continue;
+
+    describe(block.name, () => {
+      test("source-form MUST NOT contain embedded '\\n\\n' escape (use real newlines in template literal)", () => {
+        // The forbidden pattern is the literal four-character source-text
+        // sequence: backslash, n, backslash, n. In source these appear inside
+        // template literals (`...\n\n...`) or quoted strings ("...\n\n").
+        // The canonical form is a template literal with REAL newlines so the
+        // source mirrors the rendered prompt byte-for-byte without escapes.
+        const hasEscapedDoubleNewline = /\\n\\n/.test(block.raw);
+        expect(
+          hasEscapedDoubleNewline,
+          `${block.name} description (src/server.ts:${block.lineNo}) contains embedded '\\n\\n' escapes. ` +
+            `Use a template literal with REAL newlines instead — source should mirror the rendered prompt. ` +
+            `Diff: replace \`...\\n\\n...\` source spans with multi-line template literals.`,
+        ).toBe(false);
+      });
+
+      test("source-form MUST NOT use multi-line string concat with '+' (use template literal)", () => {
+        // Concat-form was the legacy alternative — `"...\n\n" + "WHEN:\n"`.
+        // Once we ban `\n\n`, the only sensible multi-section shape is a
+        // template literal. This second assertion makes that explicit so a
+        // contributor doesn't switch one negative form for another (e.g.
+        // splitting on a newline inside a `+ "\n"` chain).
+        //
+        // Heuristic: a `"\n" +` or `"+ \n"` chain inside the description
+        // block. Single-line concats (e.g. `"a " + "b"`) are too loose to
+        // ban without false positives, so we anchor on the embedded newline
+        // form which is what multi-section descriptions actually used.
+        const hasConcatNewline = /"[^"]*"\s*\+\s*\n\s*"/.test(block.raw) || /\\n"\s*\+/.test(block.raw);
+        expect(
+          hasConcatNewline,
+          `${block.name} description (src/server.ts:${block.lineNo}) uses multi-line string concat with '+'. ` +
+            `Use a template literal with REAL newlines instead — single canonical source form for all multi-section descriptions.`,
+        ).toBe(false);
+      });
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// open_ctx_index: directory path support (#687)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Reported by @matiasduartee in #687: passing a directory path to open_ctx_index
+// surfaces `refusing to index <path>: not a regular file` from the security
+// gate at src/store.ts:845. The gate is correct and stays — directory support
+// is added as a separate concern via `ContentStore.indexDirectory()` dispatched
+// at the server handler, with each discovered file going through the existing
+// per-file `openSync + fstatSync.isFile()` invariant.
+//
+// Cross-OS — repro spanned macOS + Windows 11 across 4 clients.
+
+describe("open_ctx_index: directory path support (#687)", () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "open_ctx-index-dir-687-"));
+
+  function makeProjectDir(name: string): string {
+    const dir = join(baseDir, name);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  afterAll(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  function spawnServerWithProjectDir(projectDirEnv: string): ChildProcess {
+    return spawn("node", [mcpEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+        OPENCODE_PROJECT_DIR: projectDirEnv,
+      },
+    });
+  }
+
+  async function awaitRpc(
+    proc: ChildProcess,
+    id: number,
+    request: Record<string, unknown>,
+    timeoutMs = 15_000,
+  ): Promise<DoctorJsonRpcResponse | undefined> {
+    return new Promise((resolveProm) => {
+      let buffer = "";
+      const onData = (d: Buffer) => {
+        buffer += d.toString();
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line) as DoctorJsonRpcResponse;
+            if (parsed.id === id) {
+              proc.stdout!.off("data", onData);
+              clearTimeout(timer);
+              resolveProm(parsed);
+              return;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+      const timer = setTimeout(() => {
+        proc.stdout!.off("data", onData);
+        resolveProm(undefined);
+      }, timeoutMs);
+      proc.stdout!.on("data", onData);
+      sendRpc(proc, request);
+    });
+  }
+
+  async function initialize(proc: ChildProcess, suffix: string): Promise<void> {
+    await awaitRpc(proc, 1, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: `open_ctx-index-dir-${suffix}`, version: "1.0" },
+      },
+    });
+    sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+  }
+
+  test("file path still indexes (backwards-compat control)", async () => {
+    const projectDir = makeProjectDir("compat");
+    writeFileSync(join(projectDir, "doc.md"), "# Doc\n\nbody\n");
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "compat");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "doc.md" } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      expect(text).toMatch(/Indexed \d+ section/);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  test("directory with 3 .md files indexes all 3", async () => {
+    const projectDir = makeProjectDir("happy");
+    const docs = join(projectDir, "docs");
+    mkdirSync(docs);
+    writeFileSync(join(docs, "a.md"), "# A\n\nalpha-687\n");
+    writeFileSync(join(docs, "b.md"), "# B\n\nbeta-687\n");
+    writeFileSync(join(docs, "c.md"), "# C\n\ngamma-687\n");
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "happy");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "docs" } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      // Response must report directory indexing — 3 files.
+      expect(text).toMatch(/3 file/i);
+      expect(text).not.toMatch(/not a regular file/);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  test("empty directory returns 0-files response, not error", async () => {
+    const projectDir = makeProjectDir("empty");
+    const empty = join(projectDir, "empty");
+    mkdirSync(empty);
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "empty");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "empty" } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      expect(resp?.result?.isError).not.toBe(true);
+      expect(text).toMatch(/0 file/i);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  test("nested directory respects maxDepth", async () => {
+    const projectDir = makeProjectDir("depth");
+    mkdirSync(join(projectDir, "lvl1", "lvl2", "lvl3"), { recursive: true });
+    writeFileSync(join(projectDir, "root.md"), "# root\n");
+    writeFileSync(join(projectDir, "lvl1", "one.md"), "# one\n");
+    writeFileSync(join(projectDir, "lvl1", "lvl2", "two.md"), "# two\n");
+    writeFileSync(join(projectDir, "lvl1", "lvl2", "lvl3", "three.md"), "# three\n");
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "depth");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: ".", maxDepth: 1 } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      // maxDepth 1: root.md + one.md = 2 files (lvl2/* and lvl3/* excluded).
+      expect(text).toMatch(/2 file/i);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  test("respects default exclude patterns (node_modules, .git skip)", async () => {
+    const projectDir = makeProjectDir("excl");
+    mkdirSync(join(projectDir, "node_modules", "pkg"), { recursive: true });
+    mkdirSync(join(projectDir, ".git"), { recursive: true });
+    writeFileSync(join(projectDir, "real.md"), "# real\n");
+    writeFileSync(join(projectDir, "node_modules", "pkg", "junk.md"), "# junk\n");
+    writeFileSync(join(projectDir, ".git", "config.md"), "# git\n");
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "excl");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "." } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      // Only real.md indexed.
+      expect(text).toMatch(/1 file/i);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+
+  test("respects maxFiles cap (50 fixtures, request 10)", async () => {
+    const projectDir = makeProjectDir("cap");
+    const fixtures = join(projectDir, "fx");
+    mkdirSync(fixtures);
+    for (let i = 0; i < 50; i++) {
+      writeFileSync(join(fixtures, `f${i}.md`), `# file ${i}\n`);
+    }
+    const proc = spawnServerWithProjectDir(projectDir);
+    try {
+      await initialize(proc, "cap");
+      const resp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: { name: "open_ctx_index", arguments: { path: "fx", maxFiles: 10 } },
+      });
+      expect(resp?.error).toBeUndefined();
+      const text = resp?.result?.content?.[0]?.text ?? "";
+      // Cap notice in response (architect FTS5-blowup guard).
+      expect(text).toMatch(/10 file/i);
+      expect(text).toMatch(/cap|limit|max/i);
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+    }
+  }, 30_000);
+});
+
+describe("open_ctx_index: root-level symlink defense in directory dispatch", () => {
+  // The directory-dispatch branch used statSync to decide whether to walk
+  // a path as a directory. statSync follows symlinks, so a path like
+  // `/tmp/link -> /etc` reported as a directory and walkDirectoryDetailed
+  // then realpathSync'd internally and indexed /etc. The deny-glob check
+  // at the head of the handler had run against `/tmp/link`, not /etc, so a
+  // user whose deny globs include /etc but not /tmp would still see /etc
+  // contents land in the FTS5 store. Fix: detect root-level symlinks with
+  // lstatSync, realpath them once, and re-apply the deny check against
+  // the actual walk target before dispatching.
+
+  const SERVER_SOURCE = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("open_ctx_index handler lstats and re-deny-checks symlinks before directory dispatch", () => {
+    const dispatchBlock = SERVER_SOURCE.match(
+      /Root-level symlink defense[\s\S]*?if \(resolvedPath && existsSync\(resolvedPath\) && statSync\(resolvedPath\)\.isDirectory\(\)\)/,
+    );
+    expect(dispatchBlock).not.toBeNull();
+    const block = dispatchBlock![0];
+    expect(block).toMatch(/const lst = lstatSync\(resolvedPath\);/);
+    expect(block).toMatch(/lst\.isSymbolicLink\(\)/);
+    expect(block).toMatch(/realpathSync\(resolvedPath\)/);
+    expect(block).toMatch(/const realDenied = checkFilePathDenyPolicy\(realTarget, "open_ctx_index"\);/);
+    expect(block).toMatch(/if \(realDenied\) return tracked\(realDenied\);/);
+    expect(SERVER_SOURCE).toMatch(/import\s*\{[^}]*\brealpathSync\b[^}]*\}\s*from\s*"node:fs"/);
+  });
+
+  test("algorithm: lstatSync + realpath identifies a symlinked directory whose target differs", () => {
+    // The behavior the fix depends on: lstatSync on a symlink reports
+    // isSymbolicLink()=true and isDirectory()=false. realpathSync resolves
+    // to the target. statSync, by contrast, would report isDirectory()=true
+    // and silently follow -- the pre-fix dispatch relied on that.
+    const base = mkdtempSync(join(tmpdir(), "open_ctx-index-symlink-defense-"));
+    try {
+      const realDir = join(base, "real");
+      const linkPath = join(base, "link");
+      mkdirSync(realDir, { recursive: true });
+      writeFileSync(join(realDir, "marker.txt"), "real");
+
+      const fsLocal = require("node:fs") as typeof import("node:fs");
+      // "junction" on Windows so the test works without admin / Developer
+      // Mode; lstatSync still reports isSymbolicLink()===true for junctions,
+      // which is what the algorithm-under-test depends on.
+      const symlinkType = process.platform === "win32" ? "junction" : "dir";
+      fsLocal.symlinkSync(realDir, linkPath, symlinkType);
+
+      const lst = fsLocal.lstatSync(linkPath);
+      expect(lst.isSymbolicLink()).toBe(true);
+      expect(lst.isDirectory()).toBe(false);
+      expect(fsLocal.statSync(linkPath).isDirectory()).toBe(true);
+
+      const real = fsLocal.realpathSync(linkPath);
+      expect(real).not.toBe(linkPath);
+      expect(real).toBe(fsLocal.realpathSync(realDir));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("open_ctx_fetch_and_index: response body size cap", () => {
+  // open_ctx_fetch_and_index spawns a subprocess that fetches a URL, writes the
+  // response body to a tmpfile, exits, and the parent reads the file back
+  // into the long-running MCP server's heap via readFileSync. Without a
+  // cap, an unexpectedly large endpoint (or a slowloris that keeps
+  // appending chunks until the subprocess is killed) can either OOM the
+  // subprocess or, worse, propagate a multi-GB response into the parent
+  // heap and crash the MCP server. Cap to 50 MB on both ends.
+
+  const SERVER_SOURCE = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("subprocess buildFetchCode caps response via Content-Length and post-text length", () => {
+    expect(SERVER_SOURCE).toContain("const MAX_FETCH_BYTES = 50 * 1024 * 1024;");
+    expect(SERVER_SOURCE).toContain("async function safeText(resp)");
+    // The three response paths (JSON, HTML, default) all route through safeText
+    // instead of resp.text() directly.
+    const buildFetchSrc = SERVER_SOURCE.slice(
+      SERVER_SOURCE.indexOf("export function buildFetchCode"),
+      SERVER_SOURCE.indexOf("// fetch_and_index helpers"),
+    );
+    expect(buildFetchSrc.length).toBeGreaterThan(0);
+    expect(buildFetchSrc.match(/await safeText\(resp\)/g)?.length).toBeGreaterThanOrEqual(3);
+    // The pre-fix call sites (one per content-type branch) routed through
+    // `await resp.text()` directly. Now only one such call survives,
+    // inside safeText itself. Count exactly one.
+    const directCalls = buildFetchSrc.match(/await resp\.text\(\)/g) ?? [];
+    expect(directCalls.length).toBe(1);
+  });
+
+  test("parent-side fetchOneUrl stat-gates outputPath before readFileSync", () => {
+    const fetchOneUrlSrc = SERVER_SOURCE.slice(
+      SERVER_SOURCE.indexOf("async function fetchOneUrl"),
+      SERVER_SOURCE.indexOf("async function fetchOneUrl") + 6000,
+    );
+    expect(fetchOneUrlSrc).toContain("MAX_FETCH_OUTPUT_BYTES = 50 * 1024 * 1024");
+    expect(fetchOneUrlSrc).toMatch(/statSync\(outputPath\)\.size/);
+    expect(fetchOneUrlSrc).toMatch(/fileSize > MAX_FETCH_OUTPUT_BYTES/);
+  });
+});
+
+describe("getStatsFilePath: sanitize CLAUDE_SESSION_ID before path.join", () => {
+  // CLAUDE_SESSION_ID flows from the hosting process straight into a
+  // path.join, and path.join collapses ".." segments. CLAUDE_SESSION_ID=
+  // "../../evil" would write "stats-evil.json" two levels above statsDir.
+  // The env var is not under direct MCP-tool-caller control, but in CI /
+  // multi-tenant contexts where the host env is partly influenceable this
+  // is an arbitrary-write primitive. Reject any session id whose
+  // characters aren't [A-Za-z0-9._-] and fall back to pid-based id.
+
+  const SERVER_SOURCE = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("sanitizeSessionId exists and is called from getStatsFilePath", () => {
+    expect(SERVER_SOURCE).toMatch(/const SESSION_ID_RE = \/\^\[A-Za-z0-9\._-\]\+\$\//);
+    expect(SERVER_SOURCE).toContain("function sanitizeSessionId(raw: string): string {");
+    const getStatsSlice = SERVER_SOURCE.slice(
+      SERVER_SOURCE.indexOf("function getStatsFilePath"),
+      SERVER_SOURCE.indexOf("function getStatsFilePath") + 600,
+    );
+    expect(getStatsSlice).toMatch(/sanitizeSessionId\(raw\)/);
+    // The pre-fix direct splice of the env var into the join is gone.
+    expect(getStatsSlice).not.toMatch(/join\(statsDir, `stats-\$\{process\.env\.CLAUDE_SESSION_ID/);
+  });
+
+  test("algorithm: sanitizer rejects traversal characters and falls back to pid", () => {
+    // Mirror the production sanitizer in isolation. The malicious shapes
+    // must all fall through to the pid-based id; the legitimate UUID-ish
+    // shape passes through unchanged.
+    const SESSION_ID_RE = /^[A-Za-z0-9._-]+$/;
+    const sanitize = (raw: string): string => (SESSION_ID_RE.test(raw) ? raw : `pid-${process.ppid}`);
+
+    expect(sanitize("../../evil")).toMatch(/^pid-\d+$/);
+    expect(sanitize("/etc/passwd")).toMatch(/^pid-\d+$/);
+    expect(sanitize("a/b")).toMatch(/^pid-\d+$/);
+    expect(sanitize("a\\b")).toMatch(/^pid-\d+$/);
+    expect(sanitize("..\\..")).toMatch(/^pid-\d+$/);
+    expect(sanitize("")).toMatch(/^pid-\d+$/);
+
+    // Legitimate ids pass through.
+    expect(sanitize("session-abc123")).toBe("session-abc123");
+    expect(sanitize("pid-12345")).toBe("pid-12345");
+    expect(sanitize("550e8400-e29b-41d4-a716-446655440000")).toBe("550e8400-e29b-41d4-a716-446655440000");
+    expect(sanitize("MyHost_2024.01")).toBe("MyHost_2024.01");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cross-platform audit follow-up — schema/observability fixes for #696 #697
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("open_ctx_insight schema description (issue #697)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("description states it is a dashboard launcher, not a Q&A engine", () => {
+    expect(serverSrc).toMatch(/open_ctx_insight[\s\S]{0,2000}dashboard launcher/);
+  });
+
+  test("description redirects natural-language queries to open_ctx_search", () => {
+    expect(serverSrc).toMatch(/open_ctx_insight[\s\S]{0,2000}use open_ctx_search/);
+  });
+
+  test("description preserves the original analytics framing", () => {
+    expect(serverSrc).toMatch(/Opens the open-context-mode Insight dashboard/);
+  });
+});
+
+describe("open_ctx_batch_execute query_scope (issue #696)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  // The batch scope tip is emitted once per process; reset the module-level
+  // flag before each test so the "first call" assertions are deterministic
+  // under vitest's shared fork pool.
+  beforeEach(async () => {
+    const { resetBatchFooterState } = await import("../../src/server.js");
+    resetBatchFooterState();
+  });
+
+  test("schema declares query_scope enum with batch default", () => {
+    expect(serverSrc).toMatch(/query_scope:\s*z\s*\.enum\(\["batch",\s*"global"\]\)/);
+    expect(serverSrc).toContain('.default("batch")');
+  });
+
+  test("schema describes both scope semantics", () => {
+    expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}searches ONLY the chunks/i);
+    expect(serverSrc).toMatch(/query_scope[\s\S]{0,2000}searches the entire persistent index/i);
+  });
+
+  test("formatBatchQueryResults shows the batch scope tip once per process", async () => {
+    const { formatBatchQueryResults } = await import("../../src/server.js");
+    const store = new ContentStore(":memory:");
+    store.index({
+      content: "# Section A\n\nValidation of frontmatter is critical.\n",
+      source: "batch:cmd1",
+    });
+
+    // First non-global batch call in a fresh process surfaces the tip.
+    const first = formatBatchQueryResults(store, ["validation"], "batch:cmd1").join("\n");
+    expect(first).toMatch(/Results are scoped to this batch only/);
+    expect(first).toMatch(/query_scope:\s*"global"/);
+
+    // A second call in the same process omits the now-redundant tip.
+    const second = formatBatchQueryResults(store, ["validation"], "batch:cmd1").join("\n");
+    expect(second).not.toMatch(/Results are scoped to this batch only/);
+  });
+
+  test("formatBatchQueryResults global scope drops batch tip and notes global scope", async () => {
+    const { formatBatchQueryResults } = await import("../../src/server.js");
+    const store = new ContentStore(":memory:");
+    store.index({
+      content: "# Section A\n\nValidation of frontmatter is critical.\n",
+      source: "other:source",
+    });
+    const lines = formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "global");
+    const text = lines.join("\n");
+    expect(text).toMatch(/query_scope:\s*"global"/);
+    expect(text).not.toMatch(/Results are scoped to this batch only/);
+  });
+
+  test("formatBatchQueryResults reports a miss so follow-up terms stay gated", async () => {
+    const { formatBatchQueryResults } = await import("../../src/server.js");
+    const store = new ContentStore(":memory:");
+    store.index({
+      content: "# Section A\n\nValidation of frontmatter is critical.\n",
+      source: "batch:cmd1",
+    });
+
+    const allHit = { anyMiss: false };
+    formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "batch", allHit);
+    expect(allHit.anyMiss).toBe(false);
+
+    const withMiss = { anyMiss: false };
+    formatBatchQueryResults(store, ["nonexistent-term-xyz"], "batch:cmd1", undefined, "batch", withMiss);
+    expect(withMiss.anyMiss).toBe(true);
+  });
+});
+
+// #947 — `timeoutMs` bounded only runBatchCommands. Everything after it —
+// store.index(), the section inventory, the per-query FTS search — is
+// synchronous SQLite, so a call that asked for 120s could sit in flight for
+// 257 minutes behind a bloated index. The deadline is now polled between
+// those phases and between queries.
+describe("open_ctx_batch_execute timeoutMs bounds the whole handler (issue #947)", () => {
+  const batchTool = REGISTERED_CTX_TOOLS.find((t) => t.name === "open_ctx_batch_execute");
+
+  test("formatBatchQueryResults stops issuing queries once the deadline passes", async () => {
+    const { formatBatchQueryResults } = await import("../../src/server.js");
+    const store = new ContentStore(":memory:");
+    store.index({ content: "# Section A\n\nValidation of frontmatter is critical.\n", source: "batch:cmd1" });
+
+    const expired = Date.now() - 1;
+    const stats = { anyMiss: false };
+    const lines = formatBatchQueryResults(store, ["validation", "frontmatter"], "batch:cmd1", undefined, "batch", stats, expired);
+
+    expect(stats.budgetExhausted).toBe(true);
+    expect(stats.searched ?? 0).toBe(0);
+    // Every query is still labeled, so the agent knows what it did not get.
+    expect(lines.join("\n")).toMatch(/## validation\n\(search budget spent/);
+    expect(lines.join("\n")).toMatch(/## frontmatter\n\(search budget spent/);
+
+    // No deadline = the historical behavior, whatever the clock says.
+    const open = { anyMiss: false };
+    const openLines = formatBatchQueryResults(store, ["validation"], "batch:cmd1", undefined, "batch", open, Date.now() + 60_000);
+    expect(open.budgetExhausted).toBeUndefined();
+    expect(open.searched).toBe(1);
+    expect(openLines.join("\n")).toMatch(/### Section A/);
+  });
+
+  test("a spent budget skips indexing instead of entering it, and says so", async () => {
+    if (!batchTool) throw new Error("open_ctx_batch_execute is not registered");
+    // Isolate the content store: this handler indexes, and the shared afterEach
+    // restores OPEN_CONTEXT_MODE_DIR.
+    process.env[STORAGE_ENV_KEY] = mkdtempSync(join(tmpdir(), "open_ctx-947-store-"));
+    // The command phase burns the whole shared budget (serial path), so by the
+    // time indexing would start the caller's deadline is already past.
+    const resp = (await batchTool.handler({
+      commands: [
+        { label: "slow", command: "sleep 5" },
+        { label: "echo", command: "printf hi" },
+      ],
+      queries: ["hi"],
+      concurrency: 1,
+      timeoutMs: 250,
+    })) as { content?: Array<{ text?: string }>; isError?: boolean };
+    const text = resp.content?.[0]?.text ?? "";
+
+    expect(resp.isError).toBeFalsy();
+    // The command inventory is still delivered …
+    expect(text).toContain("- slow: `sleep 5`");
+    // … but the post-command phases were skipped, and the response says which.
+    expect(text).toMatch(/\*\*Budget:\*\* the 250ms budget ran out/);
+    expect(text).toMatch(/skipped indexing/);
+    expect(text).toMatch(/Indexed 0 sections\./);
+  }, 30_000);
+});
+
+describe("open_ctx_search progressive throttle observability (issue #697)", () => {
+  const serverSrc = readFileSync(resolve(__dirname, "../../src/server.ts"), "utf-8");
+
+  test("env vars override throttle thresholds with positive-number validation", () => {
+    expect(serverSrc).toContain("OPEN_CONTEXT_MODE_SEARCH_WINDOW_MS");
+    expect(serverSrc).toContain("OPEN_CONTEXT_MODE_SEARCH_MAX_RESULTS_AFTER");
+    expect(serverSrc).toContain("OPEN_CONTEXT_MODE_SEARCH_BLOCK_AFTER");
+    expect(serverSrc).toMatch(/readPositiveEnv\("OPEN_CONTEXT_MODE_SEARCH_WINDOW_MS"/);
+  });
+
+  // A hard refusal is a routing dead end: open_ctx_search is where the redirect
+  // strategy sends the agent, so blocking it pushes the agent back onto
+  // Bash/Read — the flood this project exists to prevent. 8/min cut off
+  // legitimate research sessions mid-thread.
+  test("the hard block is not so low that it refuses a normal research session", () => {
+    const [, blockDefault] = serverSrc.match(/readPositiveEnv\("OPEN_CONTEXT_MODE_SEARCH_BLOCK_AFTER",\s*(\d+)\)/) ?? [];
+    expect(Number(blockDefault)).toBeGreaterThanOrEqual(20);
+  });
+
+  // The soft taper trades result count for bytes on purpose. Widening it would
+  // spend bytes to solve a problem the block default already avoids.
+  test("the soft taper keeps its conservative default", () => {
+    const [, softDefault] = serverSrc.match(/readPositiveEnv\("OPEN_CONTEXT_MODE_SEARCH_MAX_RESULTS_AFTER",\s*(\d+)\)/) ?? [];
+    expect(Number(softDefault)).toBe(3);
+  });
+
+  test("throttle counter line is surfaced on every response, not only after soft cap", () => {
+    // Branch before the soft cap — should still inform the agent, stating the
+    // soft-cap and hard-block call numbers as absolute thresholds.
+    expect(serverSrc).toMatch(/Throttle:\s*search call\s+#\$\{searchCallCount\}/);
+    expect(serverSrc).toMatch(/Soft cap[\s\S]{0,80}call\s+#\$\{SEARCH_MAX_RESULTS_AFTER\}/);
+    expect(serverSrc).toMatch(/hard block at #\$\{SEARCH_BLOCK_AFTER\}/);
+    // Branch at/after soft cap keeps the historical warning shape.
+    expect(serverSrc).toMatch(/⚠ search call #\$\{searchCallCount\}/);
+  });
+
+  test("open_ctx_search description documents the throttle policy", () => {
+    expect(serverSrc).toMatch(/RETURNS:[\s\S]{0,2000}rolling time window/i);
+    expect(serverSrc).toMatch(/OPEN_CONTEXT_MODE_SEARCH_WINDOW_MS/);
+  });
+});
+
+describe("open_ctx_stats cache observability + index_state (issue #697)", () => {
+  test("ContentStore.getIndexState aggregates totals correctly", async () => {
+    const store = new ContentStore(":memory:");
+    expect(store.getIndexState()).toEqual({
+      totalChunks: 0,
+      totalSources: 0,
+      lastIndexedAt: undefined,
+    });
+    store.index({ content: "# A\n\nalpha\n", source: "src-alpha" });
+    store.index({
+      content: "# B\n\nbeta\n\n# C\n\ngamma\n",
+      source: "src-beta",
+    });
+    const state = store.getIndexState();
+    expect(state.totalSources).toBe(2);
+    expect(state.totalChunks).toBeGreaterThanOrEqual(2);
+    expect(state.lastIndexedAt).toBeDefined();
+    expect(typeof state.lastIndexedAt).toBe("string");
+  });
+
+  test("AnalyticsEngine exposes cache_hit_rate computed from hits + misses (no Observability rendering)", async () => {
+    // hit_rate is still computed correctly on the report; we just don't render
+    // the machine-readable Observability block in open_ctx_stats output any more.
+    const { AnalyticsEngine } = await import("../../src/session/analytics-query.js");
+    const { formatReport } = await import("../../src/session/analytics-render.js");
+    const Database = (await import("better-sqlite3")).default;
+    const sdb = new Database(":memory:");
+    sdb.exec(`
+      CREATE TABLE session_meta (session_id TEXT PRIMARY KEY, started_at TEXT, compact_count INTEGER DEFAULT 0);
+      CREATE TABLE session_events (id INTEGER PRIMARY KEY, session_id TEXT, category TEXT, type TEXT, data TEXT, created_at TEXT);
+      CREATE TABLE session_resume (id INTEGER PRIMARY KEY, session_id TEXT, event_count INTEGER, consumed INTEGER, created_at TEXT);
+    `);
+    const engine = new AnalyticsEngine(sdb);
+    const report = engine.queryAll({
+      bytesReturned: {},
+      bytesIndexed: 0,
+      bytesSandboxed: 0,
+      calls: {},
+      sessionStart: Date.now() - 60_000,
+      cacheHits: 3,
+      cacheMisses: 1,
+      cacheBytesSaved: 1024,
+    });
+    expect(report.cache).toBeDefined();
+    expect(report.cache?.hits).toBe(3);
+    expect(report.cache?.misses).toBe(1);
+    expect(report.cache?.hit_rate).toBeCloseTo(0.75, 5);
+
+    // formatReport MUST NOT emit the Observability block any longer — neither
+    // on the narrative path nor on the legacy path, regardless of whether
+    // indexState is passed.
+    const textLegacy = formatReport(report, "0.0.0-test", null, {
+      indexState: {
+        totalChunks: 42,
+        totalSources: 7,
+        lastIndexedAt: "2026-05-24T12:00:00",
+      },
+    });
+    expect(textLegacy).not.toContain("## Observability");
+    expect(textLegacy).not.toContain("cache.hit_rate:");
+    expect(textLegacy).not.toContain("index.total_chunks");
+    expect(textLegacy).not.toContain("index.total_sources");
+    expect(textLegacy).not.toContain("index.last_indexed_at");
+
+    // Same expectation on the narrative early-return path.
+    const conversation = {
+      sessionId: "observability-removed-narrative-test",
+      events: 12,
+      dbCount: 1,
+      daysAlive: 1.5,
+      snapshotBytes: 0,
+      snapshotsConsumed: 0,
+      byCategory: [],
+      firstEventMs: Date.now() - 86_400_000,
+      lastEventMs: Date.now(),
+    };
+    const textNarrative = formatReport(report, "0.0.0-test", null, {
+      conversation: conversation as any,
+      indexState: {
+        totalChunks: 42,
+        totalSources: 7,
+        lastIndexedAt: "2026-05-24T12:00:00",
+      },
+      cwd: "/test/repo",
+      now: 1716552000000,
+      locale: "en-US",
+      tz: "UTC",
+    });
+    expect(textNarrative).not.toContain("## Observability");
+    expect(textNarrative).not.toContain("cache.hit_rate:");
+    expect(textNarrative).not.toContain("index.total_chunks");
+    expect(textNarrative).not.toContain("index.total_sources");
+    expect(textNarrative).not.toContain("index.last_indexed_at");
+  });
+});
+
+// Gemini's function-calling API (Antigravity CLI `agy`, Gemini CLI) rejects
+// JSON Schema `const` and `additionalProperties` and then silently drops the
+// tool from the model's function list. The sanitizer rewrites the EMITTED
+// tools/list schema in a behavior-preserving way so those tools become callable.
+describe("sanitizeSchemaForStrictClients", () => {
+  test("rewrites `const: X` to `enum: [X]` (an identical single-value constraint)", () => {
+    expect(sanitizeSchemaForStrictClients({ const: "javascript" })).toEqual({
+      enum: ["javascript"],
+    });
+    expect(sanitizeSchemaForStrictClients({ const: 1 })).toEqual({ enum: [1] });
+  });
+
+  test("strips `additionalProperties` (advisory-only — Zod validates args server-side)", () => {
+    const out = sanitizeSchemaForStrictClients({
+      type: "object",
+      additionalProperties: false,
+      properties: { a: { type: "string" } },
+    }) as Record<string, unknown>;
+    expect(out).not.toHaveProperty("additionalProperties");
+    expect(out.type).toBe("object");
+    expect(out.properties).toEqual({ a: { type: "string" } });
+  });
+
+  test("preserves every Gemini-compatible keyword unchanged", () => {
+    // enum / pattern / default / minLength etc. are accepted by Gemini and must
+    // pass through untouched so non-Gemini clients see an identical schema.
+    const input = {
+      type: "string",
+      enum: ["a", "b"],
+      pattern: "^x",
+      default: "a",
+      minLength: 1,
+      description: "desc",
+    };
+    expect(sanitizeSchemaForStrictClients(input)).toEqual(input);
+  });
+
+  test("recurses through nested properties and arrays", () => {
+    const input = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        language: { const: "shell" },
+        items: {
+          type: "array",
+          items: { const: 1 },
+          additionalProperties: true,
+        },
+      },
+    };
+    expect(sanitizeSchemaForStrictClients(input)).toEqual({
+      type: "object",
+      properties: {
+        language: { enum: ["shell"] },
+        items: { type: "array", items: { enum: [1] } },
+      },
+    });
+  });
+
+  test("leaves primitives and null untouched", () => {
+    expect(sanitizeSchemaForStrictClients("x")).toBe("x");
+    expect(sanitizeSchemaForStrictClients(7)).toBe(7);
+    expect(sanitizeSchemaForStrictClients(true)).toBe(true);
+    expect(sanitizeSchemaForStrictClients(null)).toBe(null);
+  });
+
+  test("does not mutate the input object", () => {
+    const input = { const: "x", additionalProperties: false };
+    sanitizeSchemaForStrictClients(input);
+    expect(input).toEqual({ const: "x", additionalProperties: false });
+  });
+});
+
+describe("parseJsonc / stripJsonComments (src/util/jsonc)", () => {
+  // Regression for the #787 review: the trailing-comma strip used to run a regex
+  // over the WHOLE string, eating commas INSIDE string values. parseJsonc only
+  // reaches the stripper when strict JSON.parse fails (a comment forces that),
+  // so the corruption was silent.
+  test("preserves a comma inside a string value on the comment-strip path", () => {
+    const jsonc = '{\n  // forces the strip path\n  "note": "array literal: [1, ]"\n}';
+    expect(parseJsonc<{ note: string }>(jsonc)?.note).toBe("array literal: [1, ]");
+  });
+
+  test("still strips real trailing commas (object, array, nested) once a comment forces the path", () => {
+    expect(parseJsonc('{ // c\n "a": [1, 2,], "b": { "c": 3, }, }')).toEqual({
+      a: [1, 2],
+      b: { c: 3 },
+    });
+  });
+
+  test("strips a trailing comma even when a comment sits between it and the bracket", () => {
+    expect(parseJsonc('{ "a": 1, /* note */ }')).toEqual({ a: 1 });
+  });
+
+  test("strips // line and /* */ block comments", () => {
+    expect(parseJsonc('{\n  "a": 1, // line\n  /* block */ "b": 2\n}')).toEqual({ a: 1, b: 2 });
+  });
+
+  test("keeps // and , inside string values intact (URL with trailing-comma-like text)", () => {
+    const jsonc = '{ // c\n "u": "http://x.com/a, ]" }';
+    expect(parseJsonc<{ u: string }>(jsonc)?.u).toBe("http://x.com/a, ]");
+  });
+
+  test("stripJsonComments removes a trailing comma but keeps an identical in-string one", () => {
+    expect(stripJsonComments('{"a":"x, ]","b":[1,]}')).toBe('{"a":"x, ]","b":[1]}');
+  });
+
+  test("returns undefined when both strict and lenient parses fail", () => {
+    expect(parseJsonc("not json at all {{")).toBeUndefined();
+  });
+});
+
+describe("resolveExecTimeout (agy default execution timeout)", () => {
+  const savedPlatform = process.env.OPEN_CONTEXT_MODE_PLATFORM;
+  const savedOverride = process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+  const savedGeneric = process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+  afterEach(() => {
+    if (savedPlatform === undefined) delete process.env.OPEN_CONTEXT_MODE_PLATFORM;
+    else process.env.OPEN_CONTEXT_MODE_PLATFORM = savedPlatform;
+    if (savedOverride === undefined) delete process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+    else process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = savedOverride;
+    if (savedGeneric === undefined) delete process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+    else process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = savedGeneric;
+  });
+
+  test("passes an explicit timeout through on any platform", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "antigravity-cli";
+    expect(resolveExecTimeout(5000)).toBe(5000);
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    expect(resolveExecTimeout(5000)).toBe(5000);
+  });
+
+  test("leaves the timeout unbounded (undefined) on non-agy hosts", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    delete process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+    expect(resolveExecTimeout(undefined)).toBeUndefined();
+  });
+
+  // #936 — opt-in bounded default on hosts whose RPC timeout is effectively
+  // unbounded (e.g. Claude Code stdio before v2.1.203).
+  test("honors OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS on non-agy hosts (#936)", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "120000";
+    expect(resolveExecTimeout(undefined)).toBe(120000);
+  });
+
+  test("explicit timeout still wins over the generic default (#936)", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "120000";
+    expect(resolveExecTimeout(5000)).toBe(5000);
+  });
+
+  test("generic default beats the agy built-in default under agy (#936)", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "antigravity-cli";
+    delete process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
+    process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "90000";
+    expect(resolveExecTimeout(undefined)).toBe(90000);
+  });
+
+  test("invalid generic values are ignored (#936)", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    for (const bad of ["0", "-1", "abc", ""]) {
+      process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = bad;
+      expect(resolveExecTimeout(undefined)).toBeUndefined();
+    }
+  });
+
+  test("leaves the timeout unbounded on hosts that bound the call themselves", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "opencode";
+    delete process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+    expect(resolveExecTimeout(undefined)).toBeUndefined();
+  });
+
+  // First USABLE value wins: an unusable legacy agy var must not mask a
+  // usable generic one (this fork pins the OPPOSITE order when both are
+  // usable — legacy wins under agy, see the #936 test above).
+  test("an unusable legacy override does not mask a usable generic one under agy", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "antigravity-cli";
+    process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "2500";
+    for (const bad of ["", " ", "0", "-1", "abc", "NaN", "3000000000"]) {
+      process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS = bad;
+      expect(resolveExecTimeout(undefined)).toBe(2500);
+    }
+  });
+
+  test("tolerates surrounding whitespace in an otherwise usable override", () => {
+    process.env.OPEN_CONTEXT_MODE_PLATFORM = "pi";
+    process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = "  2500  ";
+    expect(resolveExecTimeout(undefined)).toBe(2500);
+  });
+});
+
+// ─── open_ctx_* MCP tool annotations (#846) ───────────────────
+// "Server & tools" domain → this file owns tool registration per CONTRIBUTING.md.
+// Inspects the actual registered descriptors via the exported registry, not just
+// descriptions, so a missing/incorrect annotation fails CI.
+describe("open_ctx_* MCP tool annotations (#846)", () => {
+  type Hints = {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  };
+  // Classified by real behavior (no blanket readOnlyHint).
+  const EXPECTED: Record<string, Hints> = {
+    open_ctx_execute: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    open_ctx_execute_file: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    open_ctx_index: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    open_ctx_search: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    open_ctx_fetch_and_index: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    open_ctx_batch_execute: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    open_ctx_stats: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    open_ctx_doctor: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    open_ctx_purge: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    open_ctx_insight: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  };
+  const tools = REGISTERED_CTX_TOOLS as Array<{
+    name: string;
+    config: { annotations?: Hints };
+  }>;
+  const find = (name: string) => tools.find((t) => t.name === name);
+
+  test("registers exactly the expected open_ctx_* tools", () => {
+    expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(EXPECTED).sort());
+  });
+
+  test("every open_ctx_* tool carries explicit annotations classified by real behavior", () => {
+    for (const [name, hints] of Object.entries(EXPECTED)) {
+      const tool = find(name);
+      expect(tool, `${name} not registered`).toBeDefined();
+      expect(tool!.config.annotations, `${name} missing annotations`).toBeDefined();
+      expect(tool!.config.annotations).toMatchObject(hints);
+    }
+  });
+
+  test("read-only diagnostic/query tools are readOnlyHint:true (the #846 cancellation fix)", () => {
+    for (const name of ["open_ctx_search", "open_ctx_stats", "open_ctx_doctor"]) {
+      expect(find(name)!.config.annotations!.readOnlyHint).toBe(true);
+    }
+  });
+
+  test("never blanket-marks executing/mutating/destructive tools read-only", () => {
+    for (const name of [
+      "open_ctx_execute",
+      "open_ctx_execute_file",
+      "open_ctx_batch_execute",
+      "open_ctx_index",
+      "open_ctx_fetch_and_index",
+      "open_ctx_purge",
+      "open_ctx_insight",
+    ]) {
+      expect(find(name)!.config.annotations!.readOnlyHint).toBe(false);
+    }
+  });
+
+  // ─── Issue #1081: the execution deadline field states its unit ──────────────────────
+  // "Server & tools" domain -> this file owns tool registration per CONTRIBUTING.md.
+  // `open_ctx_execute`, `open_ctx_execute_file`, and `open_ctx_batch_execute` used to expose a
+  // numeric `timeout` whose unit (milliseconds) appeared nowhere in the public
+  // schema, so `timeout: 120` for a two-minute job bought a 120ms deadline. The
+  // field is now `timeoutMs` with no alias. These cases drive the real server
+  // over stdio (start.mjs loads server.bundle.mjs, so the shipped bundle is what
+  // answers) because the deadline is a timer in a spawned process killing a
+  // grandchild sandbox: nothing in this file's event loop owns that clock, so
+  // fake timers cannot substitute. A 4-second script against a 120ms deadline is
+  // a gap only a seconds-vs-milliseconds misreading can close.
+  describe("issue #1081 — execution deadline field states its unit", () => {
+    const EXEC_TOOLS = ["open_ctx_execute", "open_ctx_execute_file", "open_ctx_batch_execute"] as const;
+
+    interface TimeoutRpcResponse {
+      id?: number;
+      error?: { message: string };
+      result?: {
+        isError?: boolean;
+        content?: Array<{ text?: string }>;
+        tools?: Array<{
+          name: string;
+          inputSchema?: { properties?: Record<string, { description?: string }> };
+        }>;
+      };
+    }
+    type ToolArguments = Record<string, unknown>;
+    type ListedTools = NonNullable<NonNullable<TimeoutRpcResponse["result"]>["tools"]>;
+
+    let projectDir: string;
+    let fixtureFile: string;
+    let proc: ChildProcess;
+    let tools: ListedTools = [];
+
+    function rpc(id: number, method: string, params: Record<string, unknown>): Promise<TimeoutRpcResponse | undefined> {
+      return new Promise((settle) => {
+        let buffer = "";
+        const done = (value: TimeoutRpcResponse | undefined) => {
+          proc.stdout!.off("data", onData);
+          clearTimeout(timer);
+          settle(value);
+        };
+        const onData = (chunk: Buffer) => {
+          buffer += chunk.toString();
+          let idx: number;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const parsed = JSON.parse(line) as TimeoutRpcResponse;
+              if (parsed.id === id) return done(parsed);
+            } catch {
+              /* interleaved log line */
+            }
+          }
+        };
+        const timer = setTimeout(() => done(undefined), 25_000);
+        proc.stdout!.on("data", onData);
+        proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      });
+    }
+
+    const callTool = (id: number, name: string, args: ToolArguments) => rpc(id, "tools/call", { name, arguments: args });
+    const textOf = (r: TimeoutRpcResponse | undefined) => r?.result?.content?.[0]?.text ?? "";
+
+    /**
+     * A marker split across a concatenation so the joined form appears only in
+     * the child's stdout, never in the source echo the response prepends. Lets
+     * an assertion tell "the script produced output" from "the response quoted
+     * the script".
+     */
+    const splitMarker = (name: string) => ({
+      code: "'" + name + "'" + " + '_1081'",
+      joined: name + "_1081",
+    });
+
+    beforeAll(async () => {
+      // realpath: macOS hands out /var/... symlinks for tmpdir and the #852
+      // project-boundary check compares resolved paths.
+      projectDir = realpathSync(mkdtempSync(join(tmpdir(), "timeout-ms-1081-")));
+      fixtureFile = join(projectDir, "sample-1081.txt");
+      writeFileSync(fixtureFile, "alpha\nbeta\ngamma\n");
+      proc = spawn("node", [mcpEntry], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          OPEN_CONTEXT_MODE_DISABLE_VERSION_CHECK: "1",
+          OPENCODE_PROJECT_DIR: projectDir,
+        },
+      });
+      await rpc(1, "initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "timeout-ms-1081-test", version: "1.0" },
+      });
+      proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      tools = (await rpc(2, "tools/list", {}))?.result?.tools ?? [];
+    }, 60_000);
+
+    afterAll(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* best effort */
+      }
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    test("tools/list exposes timeoutMs with its unit, and no timeout alias", () => {
+      expect(tools.length).toBeGreaterThan(0);
+      for (const name of EXEC_TOOLS) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool, `${name} missing from tools/list`).toBeDefined();
+        const props = tool!.inputSchema?.properties ?? {};
+        expect(Object.keys(props), `${name} must advertise timeoutMs`).toContain("timeoutMs");
+        expect(Object.keys(props), `${name} must not advertise a timeout alias`).not.toContain("timeout");
+        expect(props.timeoutMs?.description ?? "", `${name}.timeoutMs description must name the unit`).toMatch(/millisecond/i);
+      }
+    });
+
+    test("timeoutMs 120 is 120 milliseconds, not 120 seconds", async () => {
+      const marker = splitMarker("EXEC_SLOW");
+      const started = Date.now();
+      const resp = await callTool(10, "open_ctx_execute", {
+        language: "javascript",
+        code: `setTimeout(() => console.log(${marker.code}), 4000);`,
+        timeoutMs: 120,
+      });
+      const elapsed = Date.now() - started;
+      expect(resp?.error).toBeUndefined();
+      expect(resp?.result?.isError).toBe(true);
+      expect(textOf(resp)).toContain("Execution timed out after 120ms");
+      // 120 seconds would have let the 4s script print and exit cleanly.
+      expect(textOf(resp)).not.toContain(marker.joined);
+      expect(elapsed).toBeLessThan(4000);
+    }, 30_000);
+
+    test("the legacy timeout key is rejected on all three tools, never aliased", async () => {
+      const marker = splitMarker("EXEC_LEGACY");
+      const cases: Array<[string, ToolArguments]> = [
+        ["open_ctx_execute", { language: "javascript", code: `console.log(${marker.code});`, timeout: 120 }],
+        ["open_ctx_execute_file", { path: fixtureFile, language: "javascript", code: `console.log(${marker.code});`, timeout: 120 }],
+        [
+          "open_ctx_batch_execute",
+          { commands: [{ label: "echo", command: `node -e "console.log(${marker.code})"` }], queries: ["one"], timeout: 120 },
+        ],
+      ];
+      let id = 20;
+      for (const [name, args] of cases) {
+        const resp = await callTool(id++, name, args);
+        const text = textOf(resp);
+        expect(resp?.result?.isError, `${name} must reject the legacy key`).toBe(true);
+        expect(text).toContain("`timeout` was renamed to `timeoutMs`");
+        expect(text).toContain("timeoutMs: 120000 is two minutes");
+        // Rejected before execution: the code never ran, so there is no alias
+        // and no silent unbounded fallback for a caller who meant two minutes.
+        expect(text).not.toContain(marker.joined);
+      }
+    }, 45_000);
+  });
+
+  // ─── MCP cancellation reaches execution handlers (#959) ───────────────────
+  describe("open_ctx_execute cancellation (#959)", () => {
+    test("the registration wrapper preserves the MCP request signal", async () => {
+      const tool = REGISTERED_CTX_TOOLS.find((entry) => entry.name === "open_ctx_execute");
+      expect(tool).toBeDefined();
+      const controller = new AbortController();
+      controller.abort(new Error("user cancelled"));
+
+      const result = (await tool!.handler(
+        { language: "javascript", code: "setInterval(() => {}, 1000);" },
+        { signal: controller.signal },
+      )) as { content?: Array<{ text?: string }>; isError?: boolean };
+
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toMatch(/user cancelled/i);
+    });
+  });
+});
