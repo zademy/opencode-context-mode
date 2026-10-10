@@ -226,7 +226,6 @@ if (cacheMatch) {
   }
 }
 
-
 // ── Self-heal Layer 4: Deploy global SessionStart hook + register in settings.json ──
 // This hook lives outside the plugin directory (~/.claude/hooks/) so it works
 // even when the plugin cache is completely broken. It creates symlinks for any

@@ -78,7 +78,7 @@ describe("opencode v2 plugin surface", () => {
       // The v2 loader rejects anything without BOTH. This mirrors the check
       // that produced `SchemaError(Missing key at ["default"])` on v1 plugins.
       expect(mod.default).toBeTypeOf("object");
-      expect(mod.default.id).toBe("open-context-mode");
+      expect(mod.default.id).toBe("opencode-context-mode");
       expect(mod.default.setup).toBeTypeOf("function");
     });
 

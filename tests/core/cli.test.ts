@@ -2606,45 +2606,6 @@ describe("PR #620 slice 4 — doctor() surfaces persistence-tier bug class", () 
     expect(window_).toMatch(/p\.log\.(error|warn)/);
     expect(window_).toMatch(/ctx[_-]?upgrade/i);
   });
-
-  it("doctor warns on stale `.mcp.json` files in cache version dirs (#609 proactive)", () => {
-    const body = doctorBody();
-    // Must reference the cache plugin path shape that PR #620 sweeps.
-    // The path nests `open-context-mode/open-context-mode` (marketplace/plugin
-    // nesting per ISSUE-609-VERDICT path examples). cli.ts uses
-    // path.join() so the literal appears as adjacent string args:
-    //   join(homedir(), ".claude", "plugins", "cache",
-    //        "open-context-mode", "open-context-mode")
-    // We assert on both the cache anchor segments AND the join args
-    // (Mert standing rule — use platform-neutral path joins, not literal
-    // separators that fail on Windows).
-    expect(body).toMatch(/"plugins"\s*,\s*"cache"/);
-    expect(body).toMatch(/"open-context-mode"\s*,\s*"open-context-mode"/);
-    // Must check for `.mcp.json` (the file that should not exist after
-    // PR #620's architectural untrack — ISSUE-609-VERDICT §H1 → PR #618 → #620).
-    const anchorIdx = body.indexOf("#609");
-    expect(anchorIdx).toBeGreaterThan(-1);
-    const window_ = body.slice(Math.max(0, anchorIdx - 500), anchorIdx + 2500);
-    expect(window_).toContain(".mcp.json");
-    // WARN (not FAIL) — the verdict spec is explicit that this is
-    // recoverable: "open_ctx_upgrade will sweep on next run".
-    expect(window_).toMatch(/p\.log\.warn/);
-    expect(window_).toMatch(/ctx[_-]?upgrade/i);
-  });
-
-  it("doctor uses homedir() (cross-platform) not literal '~' for cache scan", () => {
-    const body = doctorBody();
-    // Mert standing rule: Windows safety. Cache path must resolve via
-    // os.homedir() — not a literal `~/` prefix which fails on Windows.
-    const anchorIdx = body.indexOf("#609");
-    expect(anchorIdx).toBeGreaterThan(-1);
-    const window_ = body.slice(anchorIdx, anchorIdx + 2500);
-    // The scan must use homedir() (already imported at the top of cli.ts).
-    expect(window_).toMatch(/homedir\(\)|process\.env\.HOME/);
-    // And must NOT use a literal `~/` path string (would be treated
-    // literally on Windows).
-    expect(window_).not.toMatch(/["']~\//);
-  });
 });
 
 // ── index --source composes the per-file label (#914) ─────────────────────

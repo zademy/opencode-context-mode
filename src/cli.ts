@@ -803,7 +803,6 @@ async function doctor(): Promise<number> {
     }
   }
 
-
   // FTS5 / SQLite
   p.log.step("Checking FTS5 / SQLite...");
   try {

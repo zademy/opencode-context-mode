@@ -103,7 +103,6 @@ function isSafeWindowsPath(p) {
   return !/[&|<>"^%\r\n]/.test(p);
 }
 
-
 // ── 0. Self-heal Layer 3: Backward symlink for stale registry (anthropics/claude-code#46915) ──
 // When this install completes, installed_plugins.json may still point to an old
 // non-existent path. Create a symlink from that old path → our new directory.
