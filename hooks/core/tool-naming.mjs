@@ -55,7 +55,32 @@ export function getToolName(platform, bareTool) {
  * Returns (bareTool) => platformSpecificToolName.
  */
 export function createToolNamer(platform) {
-  return (bareTool) => getToolName(platform, bareTool);
+  // Carries its platform so the guidance factories can name the HOST's own tools
+  // without every call site threading a second argument.
+  return Object.assign((bareTool) => getToolName(platform, bareTool), { platform });
+}
+
+/**
+ * Host tools the guidance text talks about. These are NOT the plugin's tools —
+ * they are the ones the agent already has — so a wrong name makes the agent call a
+ * tool that does not exist ("Unknown tool"). Claude Code capitalizes them and
+ * ships a dedicated WebFetch; OpenCode exposes lowercase bash/read/edit/write and
+ * has no WebFetch at all. `webFetch: null` means the host has no such tool, so the
+ * guidance names the intent rather than a tool that isn't there.
+ */
+const HOST_TOOLS = {
+  "claude-code": { shell: "Bash", read: "Read", edit: "Edit", write: "Write", grep: "Grep", webFetch: "WebFetch" },
+  opencode: { shell: "bash", read: "read", edit: "edit", write: "write", grep: "grep", webFetch: null },
+  kilo: { shell: "bash", read: "read", edit: "edit", write: "write", grep: "grep", webFetch: null },
+};
+
+/**
+ * Create a namer for the host's own tools: (kind) => name | null.
+ * Unknown platforms fall back to the claude-code convention, same as getToolName().
+ */
+export function createHostNamer(platform) {
+  const table = HOST_TOOLS[platform] ?? HOST_TOOLS["claude-code"];
+  return (kind) => table[kind] ?? null;
 }
 
 /** List of all known platform IDs. */

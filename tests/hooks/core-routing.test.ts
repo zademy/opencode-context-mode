@@ -1019,9 +1019,12 @@ describe("routePreToolUse", () => {
 
     it("artifact_policy points artifacts at files with file-path return shape", () => {
       // Replaces the old "Write artifacts ... NEVER inline" wording.
-      // The semantic intent — write artifacts to files, return only the path
+      // The semantic intent — put artifacts in files, return only the path
       // plus a 1-line description — is asserted via the positive surface.
-      expect(ROUTING_BLOCK).toContain("Write artifacts (code, configs, PRDs) to files");
+      // "Put artifacts ... in files" over "Write artifacts ... to files": the
+      // capital-W "Write" read as Claude Code's Write tool, and this block is
+      // injected into every OpenCode session, where no such tool exists.
+      expect(ROUTING_BLOCK).toContain("Put artifacts (code, configs, PRDs) in files");
       expect(ROUTING_BLOCK).toContain("file path + 1-line description");
     });
 

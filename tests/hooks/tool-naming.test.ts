@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 let getToolName: (platform: string, bareTool: string) => string;
+let createHostNamer: (platform: string) => (kind: string) => string | null;
+
+// Every tool name the guidance injects into an agent's system prompt. Naming one
+// the host does not have makes the agent call it and get "Unknown tool".
+const HOST_TOOL_NAMES = ["WebFetch", "Bash", "Read", "Edit", "Write", "Grep", "Task"];
 let createToolNamer: (platform: string) => (bareTool: string) => string;
 let KNOWN_PLATFORMS: string[];
 let routePreToolUse: (
@@ -36,6 +41,8 @@ beforeAll(async () => {
   KNOWN_PLATFORMS = naming.KNOWN_PLATFORMS;
 
   const routing = await import("../../hooks/core/routing.mjs");
+  createToolNamer = naming.createToolNamer;
+  createHostNamer = naming.createHostNamer;
   routePreToolUse = routing.routePreToolUse;
   resetGuidanceThrottle = routing.resetGuidanceThrottle;
 
@@ -459,5 +466,48 @@ describe("routePreToolUse with platform parameter", () => {
       expect(result).not.toBeNull();
       expect(result!.action).toBe("context");
     });
+  });
+});
+
+// ── Host tool names in injected guidance (#follow-up: "Unknown tool" errors) ──
+
+describe("injected guidance names tools the host actually has", () => {
+  const guidanceFor = (platform: string) => {
+    const t = createToolNamer(platform);
+    return [createRoutingBlock(t), createReadGuidance(t), createGrepGuidance(t), createBashGuidance(t), createExternalMcpGuidance(t)].join(
+      "\n",
+    );
+  };
+
+  it("OpenCode guidance names no Claude Code tool", () => {
+    const text = guidanceFor("opencode");
+    for (const name of HOST_TOOL_NAMES) {
+      expect(text, `OpenCode guidance must not name ${name}`).not.toMatch(new RegExp(`\\b${name}\\b`));
+    }
+  });
+
+  it("OpenCode guidance names its own lowercase host tools", () => {
+    const text = guidanceFor("opencode");
+    expect(text).toMatch(/\bbash\b/);
+    expect(text).toMatch(/\bread\b/);
+    // WebFetch does not exist in OpenCode — name the intent, not a tool.
+    expect(text).toContain("Fetching a URL");
+  });
+
+  it("claude-code guidance keeps its own tool names", () => {
+    const text = guidanceFor("claude-code");
+    expect(text).toMatch(/\bBash\b/);
+    expect(text).toMatch(/\bWebFetch\b/);
+  });
+
+  it("a namer without a platform falls back to claude-code names", () => {
+    const bare = (tool: string) => tool;
+    expect(createRoutingBlock(bare)).toMatch(/\bBash\b/);
+  });
+
+  it("createHostNamer returns null for a host tool the platform lacks", () => {
+    expect(createHostNamer("opencode")("webFetch")).toBeNull();
+    expect(createHostNamer("opencode")("shell")).toBe("bash");
+    expect(createHostNamer("claude-code")("webFetch")).toBe("WebFetch");
   });
 });

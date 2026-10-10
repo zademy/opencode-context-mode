@@ -9,12 +9,18 @@
  * default to claude-code naming convention.
  */
 
-import { createToolNamer } from "./core/tool-naming.mjs";
+import { createToolNamer, createHostNamer } from "./core/tool-naming.mjs";
 
 // ── Factory functions ─────────────────────────────────────
 
 export function createRoutingBlock(t, options = {}) {
   const { includeCommands = true, toolSearchBootstrap = false, includeProvenance = false } = options;
+  // The block also names the HOST's own tools (bash/read/edit/write). Those names
+  // differ per host and OpenCode ships no WebFetch at all, so a hardcoded Claude
+  // Code name makes the agent call a tool that does not exist. `t` is built by
+  // createToolNamer(), which carries its platform; a bare namer falls back to
+  // Claude Code names, which is what it always did.
+  const h = createHostNamer(t.platform);
   return `
 <context_window_protection>
 ${
@@ -51,20 +57,20 @@ ${
   </tool_selection_hierarchy>
 
   <when_not_to_use>
-    - You intend to PROCESS the output (filter, count, parse, aggregate) → use ${t("open_ctx_batch_execute")} or ${t("open_ctx_execute")}. Bash stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
-    - You want to analyze, summarize, or extract from a file → use ${t("open_ctx_execute_file")}. Read stays correct when you intend to Edit the file (Edit needs the exact bytes in your conversation to match against).
-    - WebFetch → use ${t("open_ctx_fetch_and_index")}; full network access, results indexed for ${t("open_ctx_search")}, raw page bytes never enter your conversation.
+    - You intend to PROCESS the output (filter, count, parse, aggregate) → use ${t("open_ctx_batch_execute")} or ${t("open_ctx_execute")}. ${h("shell")} stays correct when you intend to OBSERVE a short fixed output (git status on a clean tree, whoami, pwd) or when you are mutating state (git, mkdir, rm, mv, navigation).
+    - You want to analyze, summarize, or extract from a file → use ${t("open_ctx_execute_file")}. ${h("read")} stays correct when you intend to ${h("edit")} the file (${h("edit")} needs the exact bytes in your conversation to match against).
+    - ${h("webFetch") ?? "Fetching a URL"} → use ${t("open_ctx_fetch_and_index")}; full network access, results indexed for ${t("open_ctx_search")}, raw page bytes never enter your conversation.
     - ${t("open_ctx_execute")} and ${t("open_ctx_execute_file")} for file writes → these run code in a subprocess and discard the sandbox FS; they are for analysis, processing, and computation only.
   </when_not_to_use>
 
   <file_writing_policy>
-    File writes use the native Write or Edit tool — ${t("open_ctx_execute")}, ${t("open_ctx_execute_file")}, and Bash subprocesses do not persist edits to the host filesystem.
+    File writes use the native ${h("write")} or ${h("edit")} tool — ${t("open_ctx_execute")}, ${t("open_ctx_execute_file")}, and ${h("shell")} subprocesses do not persist edits to the host filesystem.
     Applies to all file types: code, configs, plans, specs, YAML, JSON, markdown.
   </file_writing_policy>
 
   <output_constraints>
     <artifact_policy>
-      Write artifacts (code, configs, PRDs) to files. Return only: file path + 1-line description.
+      Put artifacts (code, configs, PRDs) in files. Return only: file path + 1-line description.
     </artifact_policy>
   </output_constraints>
   <session_continuity>
@@ -91,17 +97,25 @@ ${
 </context_window_protection>`;
 }
 
+/**
+ * Host-tool-aware sibling of createRoutingBlock: `t` may or may not carry a
+ * platform, so fall back to the Claude Code names these used to hardcode.
+ */
+const hostNamer = (t) => createHostNamer(t.platform);
+
 export function createReadGuidance(t) {
+  const h = hostNamer(t);
   return (
-    "<context_guidance>\n  <tip>\n    Reading to Edit the file? Read is correct — Edit needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use " +
+    `<context_guidance>\n  <tip>\n    Reading to ${h("edit")} the file? ${h("read")} is correct — ${h("edit")} needs the exact bytes in your conversation to match against.\n    Reading to analyze, summarize, or extract from the file? Use ` +
     t("open_ctx_execute_file") +
     "(path, language, code) — the bytes stay in the sandbox and only what your code prints enters your conversation.\n  </tip>\n</context_guidance>"
   );
 }
 
 export function createGrepGuidance(t) {
+  const h = hostNamer(t);
   return (
-    "<context_guidance>\n  <tip>\n    Grep results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through " +
+    `<context_guidance>\n  <tip>\n    ${h("grep")} results may be larger than you expect. When you intend to count, filter, or aggregate matches (not just spot-check one), run the search through ` +
     t("open_ctx_execute") +
     '(language: "javascript", code: "...") — the raw match list stays in the sandbox and only your derived answer enters your conversation. Use language: "shell" only when the code matches the host shell (PowerShell on Windows, POSIX shell on Unix).\n  </tip>\n</context_guidance>'
   );

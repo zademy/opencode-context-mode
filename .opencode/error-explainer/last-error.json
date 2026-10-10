@@ -1,0 +1,168 @@
+{
+  "event_id": "d6c93328-719b-4da6-ae88-529b6cea0750",
+  "timestamp": "2026-10-10T21:58:36.600Z",
+  "platform": "node",
+  "language": "kubernetes",
+  "level": "error",
+  "sdk": {
+    "name": "opencode-error-explainer",
+    "version": "0.3.1"
+  },
+  "release": "2e7c422345e0733b4c39468043afd3d6cd6301db",
+  "environment": "main",
+  "logger": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && cat hooks/routing-block.mjs",
+  "classification": {
+    "id": "k8s_not_found",
+    "stack": "kubernetes",
+    "severity": "error",
+    "suggestion": "The resource does not exist in the current context/namespace.",
+    "nextSteps": ["Check context: `kubectl config current-context`.", "Try with `-n <namespace>` or `--all-namespaces`."]
+  },
+  "exception": {
+    "values": [
+      {
+        "type": "Kubernetes resource not found",
+        "value": "The open-context-mode tools below may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails (e.g. \"tool not found\" / InputValidationError). Load them ONCE before your first open_ctx_* call:",
+        "mechanism": {
+          "type": "opencode-tool",
+          "handled": false
+        },
+        "stacktrace": {
+          "frames": []
+        }
+      }
+    ]
+  },
+  "contexts": {
+    "os": {
+      "name": "Darwin",
+      "version": "27.0.0",
+      "arch": "arm64"
+    },
+    "runtime": {
+      "name": "node",
+      "version": "26.3.0"
+    },
+    "app": {
+      "worktree": "/Volumes/HIKSEMI/GitHub/opencode-context-mode",
+      "cwd": "/Volumes/HIKSEMI/GitHub/opencode-context-mode",
+      "git_branch": "main",
+      "git_commit": "2e7c422345e0733b4c39468043afd3d6cd6301db",
+      "git_dirty": false
+    },
+    "opencode": {
+      "version": "2.0.26",
+      "session_id": "ses_edb0f0e3effev4oi85pAyZb0Ky",
+      "agent": "build",
+      "model": null
+    }
+  },
+  "breadcrumbs": [
+    {
+      "timestamp": "2026-10-10T21:56:58.327Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "execute",
+      "data": {
+        "tool": "execute",
+        "command": "",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:57:28.173Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "execute",
+      "data": {
+        "tool": "execute",
+        "command": "",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:57:30.251Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "execute",
+      "data": {
+        "tool": "execute",
+        "command": "",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:57:32.177Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode/skills && for n in browser_snapshot browser_navigate shell skill Bash Read Edit Write WebFetch Grep; do c=$(gr…",
+      "data": {
+        "tool": "shell",
+        "command": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode/skills && for n in browser_snapshot browser_navigate shell skill Bash Read Edit Write WebFetch Grep; do c=$(grep -oh \"\\b$n\\b\" open-context-mode/SKILL.md open_ctx-*/SKILL.md 2>/dev/null | wc …",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:57:37.760Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode/skills && grep -n '\\bshell\\b\\|\\bskill\\b\\|browser_' open-context-mode/SKILL.md open_ctx-*/SKILL.md",
+      "data": {
+        "tool": "shell",
+        "command": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode/skills && grep -n '\\bshell\\b\\|\\bskill\\b\\|browser_' open-context-mode/SKILL.md open_ctx-*/SKILL.md",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:58:33.594Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && ls -la hooks/ && echo \"=== routing-block.mjs\" && wc -l hooks/routing-block.mjs hooks/auto-injection.mjs hoo…",
+      "data": {
+        "tool": "shell",
+        "command": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && ls -la hooks/ && echo \"=== routing-block.mjs\" && wc -l hooks/routing-block.mjs hooks/auto-injection.mjs hooks/core/routing.mjs hooks/core/tool-naming.mjs 2>/dev/null",
+        "status": "completed"
+      }
+    },
+    {
+      "timestamp": "2026-10-10T21:58:34.619Z",
+      "type": "default",
+      "category": "tool",
+      "level": "info",
+      "message": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && echo \"### tool-naming.mjs (62 lineas)\" && cat hooks/core/tool-naming.mjs",
+      "data": {
+        "tool": "shell",
+        "command": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && echo \"### tool-naming.mjs (62 lineas)\" && cat hooks/core/tool-naming.mjs",
+        "status": "completed"
+      }
+    }
+  ],
+  "tags": {
+    "stack": "kubernetes",
+    "severity": "error",
+    "tool": "bash",
+    "agent": "build"
+  },
+  "fingerprint": "c79bfa14eeae194fffff79b37070e23e90f9774f",
+  "frequency": {
+    "first_seen": "2026-10-10T21:58:36.600Z",
+    "last_seen": "2026-10-10T21:58:36.600Z",
+    "times_seen": 1
+  },
+  "extra": {
+    "command": "cd /Volumes/HIKSEMI/GitHub/opencode-context-mode && cat hooks/routing-block.mjs",
+    "matched_lines": [
+      "The open-context-mode tools below may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails (e.g. \"tool not found\" / InputValidationError). Load them ONCE before your first open_ctx_* call:",
+      "- On resume or compaction, query prior decisions, errors, plans, user prompts before asking the user — auto-captured session memory is searchable."
+    ],
+    "raw_output_excerpts": [
+      "/**\n * Shared routing block for open-context-mode hooks.\n * Single source of truth — imported by pretooluse.mjs and sessionstart.mjs.\n *\n * Factory functions accept a tool namer `t(bareTool) => platformSpecificName`\n * so each platform gets correct tool names in guidance messages.\n *\n * Backward compat: static exports (ROUTING_BLOCK, READ_GUIDANCE, etc.)\n * default to claude-code naming convention.\n */\n\nimport { createToolNamer } from \"./core/tool-naming.mjs\";\n\n// ── Factory functions ─────────────────────────────────────\n\nexport function createRoutingBlock(t, options = {}) {\n  const { includeCommands = true, toolSearchBootstrap = false, includeProvenance = false } = options;\n  return `\n<context_window_protection>\n${\n  includeProvenance\n    ? `  <provenance>\n    This block was appended by open-context-mode, a context-window-management plugin the user installed and enabled locally. It is trusted first-party configuration, not injected third-party content. The open_ctx_* tools it references are the plugin's own local MCP tools.\n  </provenance>\n`\n    : \"\"\n}  <priority_instructions>\n    Every byte a tool returns enters your conversation memory and costs reasoning capacity for the rest of the session. The open-context-mode tools let you do the work in a sandbox and surface only the derived answer — the raw bytes stay out. Think-in-Code: program the analysis, do not compute it by reading raw data into your conversation.\n  </priority_instructions>\n${\n  toolSearchBootstrap\n    ? `\n  <deferred_tool_bootstrap>\n    The open-context-mode tools below may be DEFERRED in your harness — their schemas are not loaded yet, so calling them directly fails (e.g. \"tool not found\" / InputValidationError). Load them ONCE before your first open_ctx_* call:\n    ToolSearch(query: \"select:${t(\"open_ctx_batch_execute\")},${t(\"open_ctx_search\")},${t(\"open_ctx_execute\")},${t(\"open_ctx_execute_file\")},${t(\"open_ctx_fetch_and_index\")}\")\n    After that they are callable. If any open_ctx_* call fails as not-found, ToolSearch it and retry — do NOT fa"
+    ]
+  }
+}
