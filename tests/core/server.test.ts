@@ -7225,7 +7225,14 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
   const savedPlatform = process.env.OPEN_CONTEXT_MODE_PLATFORM;
   const savedOverride = process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
   const savedGeneric = process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
+  // resolveExecTimeout() resolves the host via detectPlatform(), which reads
+  // OPENCODE_CLIENT — NOT OPEN_CONTEXT_MODE_PLATFORM (that pin is consumed
+  // elsewhere). Pin the detection input so the host is the same on a laptop
+  // with ~/.config/opencode and on a bare CI runner without it.
+  const savedDetection = process.env.OPENCODE_CLIENT;
   afterEach(() => {
+    if (savedDetection === undefined) delete process.env.OPENCODE_CLIENT;
+    else process.env.OPENCODE_CLIENT = savedDetection;
     if (savedPlatform === undefined) delete process.env.OPEN_CONTEXT_MODE_PLATFORM;
     else process.env.OPEN_CONTEXT_MODE_PLATFORM = savedPlatform;
     if (savedOverride === undefined) delete process.env.OPEN_CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS;
@@ -7243,6 +7250,7 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
 
   test("leaves the timeout unbounded (undefined) on non-agy hosts", () => {
     process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.OPENCODE_CLIENT = "1"; // detection input: host resolves as opencode
     delete process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
     expect(resolveExecTimeout(undefined)).toBeUndefined();
   });
@@ -7270,6 +7278,7 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
 
   test("invalid generic values are ignored (#936)", () => {
     process.env.OPEN_CONTEXT_MODE_PLATFORM = "claude-code";
+    process.env.OPENCODE_CLIENT = "1"; // detection input: host resolves as opencode
     for (const bad of ["0", "-1", "abc", ""]) {
       process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS = bad;
       expect(resolveExecTimeout(undefined)).toBeUndefined();
@@ -7278,6 +7287,7 @@ describe("resolveExecTimeout (agy default execution timeout)", () => {
 
   test("leaves the timeout unbounded on hosts that bound the call themselves", () => {
     process.env.OPEN_CONTEXT_MODE_PLATFORM = "opencode";
+    process.env.OPENCODE_CLIENT = "1"; // detection input: host resolves as opencode
     delete process.env.OPEN_CONTEXT_MODE_DEFAULT_EXEC_TIMEOUT_MS;
     expect(resolveExecTimeout(undefined)).toBeUndefined();
   });

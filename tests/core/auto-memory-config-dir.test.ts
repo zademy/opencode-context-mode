@@ -16,12 +16,17 @@ describe("searchAutoMemory adapterless fallback", () => {
   let projectDir: string;
   let configHome: string;
   let savedXdg: string | undefined;
+  let savedAppData: string | undefined;
 
   beforeEach(() => {
     projectDir = mkdtempSync(join(tmpdir(), "ctxam-proj-"));
     configHome = mkdtempSync(join(tmpdir(), "ctxam-cfg-"));
     savedXdg = process.env.XDG_CONFIG_HOME;
+    savedAppData = process.env.APPDATA;
     process.env.XDG_CONFIG_HOME = configHome;
+    // opencodeConfigDir() reads APPDATA on win32, XDG_CONFIG_HOME elsewhere —
+    // both must point at the temp home or the fixture is written where no lookup goes.
+    if (process.platform === "win32") process.env.APPDATA = configHome;
   });
 
   afterEach(() => {
@@ -29,6 +34,8 @@ describe("searchAutoMemory adapterless fallback", () => {
     rmSync(configHome, { recursive: true, force: true });
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdg;
+    if (savedAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = savedAppData;
   });
 
   it("reads <xdg>/opencode/memory/<projectHash>", () => {

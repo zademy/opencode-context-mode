@@ -31,6 +31,11 @@ const SRC = resolve(repoRoot, "tests", "fixtures", "source-example.ts");
 const OUT = resolve(repoRoot, "tests", "fixtures", "test-output.txt");
 const ISSUES = resolve(repoRoot, "tests", "fixtures", "github-issues.json");
 
+/** Quote an absolute path for safe use inside a bash command string. On
+ *  Windows the fixture paths carry backslashes, which an unquoted
+ *  interpolation turns into escape characters and mangles the path. */
+const shq = (p: string): string => "'" + p.replace(/'/g, "'\\''") + "'";
+
 // ── Server plumbing (same JSON-RPC shape as tests/core/echo-commands.test.ts)
 
 type RpcResponse = {
@@ -129,24 +134,24 @@ afterAll(() => {
 /** #2/#3 — locate an implementation by name: file, line and the excerpt. */
 const LOOKUP = {
   language: "shell",
-  code: `grep -n 'export function setupRoutes' ${SRC} | sed "s|^|${SRC}:|"
-sed -n '146,153p' ${SRC}`,
+  code: `grep -n 'export function setupRoutes' ${shq(SRC)} | sed "s|^|${SRC}:|"
+sed -n '146,153p' ${shq(SRC)}`,
 };
 
 /** #4 — every failed test, its diagnostic detail and the run summary. */
 const DIAGNOSE = {
   language: "shell",
-  code: `grep -vE '^ +✓|^ *$' ${OUT}`,
+  code: `grep -vE '^ +✓|^ *$' ${shq(OUT)}`,
 };
 
 /** #4 negative case — failure names without any diagnostic detail. */
 const NAMES_ONLY = {
   language: "shell",
-  code: `grep -E '^ *✗ ' ${OUT}`,
+  code: `grep -E '^ *✗ ' ${shq(OUT)}`,
 };
 
 /** #4 comparison baseline — hand the whole fixture back and search it. */
-const WHOLE_FILE = { language: "shell", code: `cat ${OUT}` };
+const WHOLE_FILE = { language: "shell", code: `cat ${shq(OUT)}` };
 
 /** #2/#3 — one record out of github-issues.json by exact identifier. */
 function jsonRecord(number: number) {
