@@ -30,6 +30,11 @@ export default defineConfig({
     // Without this, Ubuntu CI consistently fails with "Worker exited unexpectedly"
     // even though all tests pass.
     teardownTimeout: isCI ? 15_000 : 5_000,
+    // The suite spawns real MCP servers (open_ctx_execute -> shells) that
+    // inherit stdio pipes. On win32 kill('SIGTERM') reaps only the direct
+    // child, so a grandchild shell keeps the pipe open and vitest blocks
+    // forever after the run. forceExit ends the process once results are in.
+    forceExit: isCI,
     // Neutralize the platform pin the in-process OpenCode plugin sets on its
     // HOST env (src/adapters/opencode/plugin.ts:408). That host is the agent
     // process, so `npm test` launched from an OpenCode session inherits
