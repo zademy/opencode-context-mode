@@ -33,3 +33,6 @@ tools/pricing/litellm-catalog.json
 # Local caches
 .ruff_cache/
 .fallow/
+
+# Runtime state from local OpenCode sessions (error-explainer history is per-machine).
+/.opencode/
