@@ -2,7 +2,7 @@
 
 **The other half of the context problem.**
 
-[![users](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fzademy%2Fopencode-context-mode%40main%2Fstats.json&query=%24.message&label=users&color=brightgreen)](https://github.com/zademy/opencode-context-mode) [![GitHub stars](https://img.shields.io/github/stars/zademy/opencode-context-mode?style=flat&color=yellow)](https://github.com/zademy/opencode-context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/zademy/opencode-context-mode?style=flat&color=blue)](https://github.com/zademy/opencode-context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/zademy/opencode-context-mode?color=green)](https://github.com/zademy/opencode-context-mode/commits) [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/open-context-mode)](https://www.npmjs.com/package/open-context-mode) [![npm downloads](https://img.shields.io/npm/dm/open-context-mode)](https://www.npmjs.com/package/open-context-mode) [![users](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fzademy%2Fopencode-context-mode%40main%2Fstats.json&query=%24.message&label=users&color=brightgreen)](https://github.com/zademy/opencode-context-mode) [![GitHub stars](https://img.shields.io/github/stars/zademy/opencode-context-mode?style=flat&color=yellow)](https://github.com/zademy/opencode-context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/zademy/opencode-context-mode?style=flat&color=blue)](https://github.com/zademy/opencode-context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/zademy/opencode-context-mode?color=green)](https://github.com/zademy/opencode-context-mode/commits) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE)
 [![Discord](https://img.shields.io/discord/1478479412700909750?label=Discord&logo=discord&color=5865f2)](https://discord.gg/DCN9jUgN5v)
 [![Hacker News #1](https://img.shields.io/badge/Hacker%20News-%231%20%E2%80%A2%20570%2B%20points-ff6600?logo=ycombinator&logoColor=white)](https://news.ycombinator.com/item?id=47193064)
 
@@ -62,6 +62,35 @@ Open Context Mode is an MCP server that solves all four sides of this problem:
 > OpenCode were removed here. See
 > [`docs/adr/0006-opencode-native-mcp-only.md`](https://github.com/zademy/opencode-context-mode/blob/main/docs/adr/0006-opencode-native-mcp-only.md).
 
+Prerequisites: Node.js >= 22.5 (or Bun).
+
+### OpenCode — the plugin
+
+OpenCode loads open-context-mode as a plugin and gets the `open_ctx_*` tools
+in-process. Two ways to install it.
+
+#### From npm — the published plugin
+
+Add the package to the `plugins` array of your OpenCode config
+(`~/.config/opencode/opencode.json` for your whole account,
+`<project>/.opencode/opencode.json` for a single project):
+
+```json
+{
+  "plugins": ["open-context-mode@latest"]
+}
+```
+
+OpenCode downloads and installs the package on restart — no checkout, no
+build. Optionally copy the routing rules so the model knows *why* a command
+was denied:
+
+```bash
+curl -fsSL -o AGENTS.md https://raw.githubusercontent.com/zademy/opencode-context-mode/main/configs/opencode/AGENTS.md
+```
+
+#### From a local checkout
+
 Build it once:
 
 ```bash
@@ -69,12 +98,7 @@ git clone https://github.com/zademy/opencode-context-mode.git
 cd opencode-context-mode && pnpm install && pnpm run build
 ```
 
-Prerequisites: Node.js >= 22.5 (or Bun).
-
-### OpenCode — the plugin
-
-OpenCode loads open-context-mode as a plugin and gets the `open_ctx_*` tools
-in-process. Write one file into your user-level OpenCode config directory
+Then write one file into your user-level OpenCode config directory
 (`~/.config/opencode/plugins/`):
 
 ```bash
@@ -85,25 +109,25 @@ EOF
 ```
 
 Replace the path with the root of your checkout (or of a global install —
-whatever holds `build/platforms/opencode/plugin.js`). Do **not** add an
-`mcp.open-context-mode` entry as well: the plugin already registers the tools, and
-a second registration leaves you with none.
-
-Optionally copy the routing rules so the model knows *why* a command was
-denied:
+whatever holds `build/platforms/opencode/plugin.js`). Optionally copy the
+routing rules from your checkout:
 
 ```bash
 cp /path/to/your/opencode-context-mode/configs/opencode/AGENTS.md AGENTS.md
 ```
 
-Then restart OpenCode (`opencode service restart`) and check:
+For a single project instead of your account, put the same plugin file in
+`<project>/.opencode/plugins/opencode-context-mode.ts`.
+
+#### Either way
+
+Do **not** add an `mcp.open-context-mode` entry as well: the plugin already
+registers the tools, and a second registration leaves you with none. Restart
+OpenCode (`opencode service restart`) and check:
 
 ```bash
 npx open-context-mode doctor
 ```
-
-For a single project instead of your account, put the same plugin file in
-`<project>/.opencode/plugins/opencode-context-mode.ts`.
 
 ### Everything else — the MCP server
 
@@ -566,4 +590,4 @@ cd opencode-context-mode && npm install && npm test
 
 ## License
 
-Licensed under [Elastic License 2.0](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE) (source-available). You can use it, fork it, modify it, and distribute it. Two things you can't do: offer it as a hosted/managed service, or remove the licensing notices. We chose ELv2 over MIT because MIT permits repackaging the code as a competing closed-source SaaS — ELv2 prevents that while keeping the source available to everyone.
+Licensed under the [MIT License](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE) — use it, fork it, modify it, and ship it, commercially or not. Just keep the copyright notice.
