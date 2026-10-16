@@ -2,7 +2,7 @@
 
 **The other half of the context problem.**
 
-[![users](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fzademy%2Fopencode-context-mode%40main%2Fstats.json&query=%24.message&label=users&color=brightgreen)](https://github.com/zademy/opencode-context-mode) [![GitHub stars](https://img.shields.io/github/stars/zademy/opencode-context-mode?style=flat&color=yellow)](https://github.com/zademy/opencode-context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/zademy/opencode-context-mode?style=flat&color=blue)](https://github.com/zademy/opencode-context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/zademy/opencode-context-mode?color=green)](https://github.com/zademy/opencode-context-mode/commits) [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
+[![users](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fzademy%2Fopencode-context-mode%40main%2Fstats.json&query=%24.message&label=users&color=brightgreen)](https://github.com/zademy/opencode-context-mode) [![GitHub stars](https://img.shields.io/github/stars/zademy/opencode-context-mode?style=flat&color=yellow)](https://github.com/zademy/opencode-context-mode/stargazers) [![GitHub forks](https://img.shields.io/github/forks/zademy/opencode-context-mode?style=flat&color=blue)](https://github.com/zademy/opencode-context-mode/network/members) [![Last commit](https://img.shields.io/github/last-commit/zademy/opencode-context-mode?color=green)](https://github.com/zademy/opencode-context-mode/commits) [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE)
 [![Discord](https://img.shields.io/discord/1478479412700909750?label=Discord&logo=discord&color=5865f2)](https://discord.gg/DCN9jUgN5v)
 [![Hacker News #1](https://img.shields.io/badge/Hacker%20News-%231%20%E2%80%A2%20570%2B%20points-ff6600?logo=ycombinator&logoColor=white)](https://news.ycombinator.com/item?id=47193064)
 
@@ -60,7 +60,7 @@ Open Context Mode is an MCP server that solves all four sides of this problem:
 > [`mksglu/open-context-mode`](https://github.com/mksglu/open-context-mode).** The upstream
 > original is where the code came from; the integrations for everything except
 > OpenCode were removed here. See
-> [`docs/adr/0006-opencode-native-mcp-only.md`](docs/adr/0006-opencode-native-mcp-only.md).
+> [`docs/adr/0006-opencode-native-mcp-only.md`](https://github.com/zademy/opencode-context-mode/blob/main/docs/adr/0006-opencode-native-mcp-only.md).
 
 Build it once:
 
@@ -328,7 +328,7 @@ commands and redirect them to the sandbox before execution. Instruction
 files guide the model through the prompt but cannot block anything.
 
 On OpenCode the plugin installs both halves: the hook that blocks, and
-[`AGENTS.md`](configs/opencode/AGENTS.md) for the model to read. **~98% of
+[`AGENTS.md`](https://github.com/zademy/opencode-context-mode/blob/main/configs/opencode/AGENTS.md) for the model to read. **~98% of
 the context-window spend avoided.**
 
 An MCP client gets neither. It still gets the sandbox — `open_ctx_execute`
@@ -336,7 +336,7 @@ rejects `curl`, `wget` and friends on its own — but nothing redirects the
 model toward it, so an unrouted `curl` or Playwright snapshot can dump 56 KB
 into the context: roughly 60% saved instead of 98%.
 
-Copy [`configs/opencode/AGENTS.md`](configs/opencode/AGENTS.md) into your
+Copy [`configs/opencode/AGENTS.md`](https://github.com/zademy/opencode-context-mode/blob/main/configs/opencode/AGENTS.md) into your
 project root to give an MCP client the instruction half.
 
 ## Utility Commands
@@ -366,7 +366,7 @@ bash scripts/open_ctx-debug.sh    # full diagnostic report for bug reports
 
 The debug script collects OS info, runtime versions, better-sqlite3 status, adapter detection, config files (redacted), hook validation, FTS5/SQLite test, executor test, process check, session databases, and environment variables into a single pasteable markdown report.
 
-Works on every client. The `open_ctx-*` skills under [`skills/`](skills/) expose the same tools to clients that render slash commands.
+Works on every client. The `open_ctx-*` skills under [`skills/`](https://github.com/zademy/opencode-context-mode/tree/main/skills) expose the same tools to clients that render slash commands.
 
 ## Benchmarks
 
@@ -383,7 +383,7 @@ Works on every client. The `open_ctx-*` skills under [`skills/`](skills/) expose
 
 Over a full session: 315 KB of raw output becomes 5.4 KB. Session time extends from ~30 minutes to ~3 hours.
 
-[Full benchmark data with 21 scenarios →](BENCHMARK.md)
+[Full benchmark data with 21 scenarios →](https://github.com/zademy/opencode-context-mode/blob/main/BENCHMARK.md)
 
 ## Try It
 
@@ -557,7 +557,7 @@ Only the exact value `1` enables it. **Read the trade-off before setting it:** w
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and TDD guidelines.
+See [CONTRIBUTING.md](https://github.com/zademy/opencode-context-mode/blob/main/CONTRIBUTING.md) for the development workflow and TDD guidelines.
 
 ```bash
 git clone https://github.com/zademy/opencode-context-mode.git
@@ -566,4 +566,4 @@ cd opencode-context-mode && npm install && npm test
 
 ## License
 
-Licensed under [Elastic License 2.0](LICENSE) (source-available). You can use it, fork it, modify it, and distribute it. Two things you can't do: offer it as a hosted/managed service, or remove the licensing notices. We chose ELv2 over MIT because MIT permits repackaging the code as a competing closed-source SaaS — ELv2 prevents that while keeping the source available to everyone.
+Licensed under [Elastic License 2.0](https://github.com/zademy/opencode-context-mode/blob/main/LICENSE) (source-available). You can use it, fork it, modify it, and distribute it. Two things you can't do: offer it as a hosted/managed service, or remove the licensing notices. We chose ELv2 over MIT because MIT permits repackaging the code as a competing closed-source SaaS — ELv2 prevents that while keeping the source available to everyone.
