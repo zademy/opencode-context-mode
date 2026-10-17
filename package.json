@@ -1,6 +1,6 @@
 {
   "name": "open-context-mode",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "type": "module",
   "description": "OpenCode plugin + MCP server that saves 98% of your context window. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
   "author": "Mert Koseoğlu",
@@ -79,21 +79,21 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opencode/plugin": "^2.0.22",
+    "@opencode/plugin": "^2.0.32",
     "@tailwindcss/cli": "^4.3.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.11",
     "@types/turndown": "^5.0.6",
-    "esbuild": "^0.27.7",
-    "eslint": "^10.12.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
     "eslint-config-prettier": "^10.1.8",
-    "fallow": "^3.31.0",
+    "fallow": "^3.33.1",
     "globals": "^17.13.0",
-    "prettier": "^3.9.9",
+    "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.71.0",
-    "vitest": "^4.1.11"
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
   },
   "packageManager": "pnpm@10.23.0+sha512.21c4e5698002ade97e4efe8b8b4a89a8de3c85a37919f957e7a0f30f38fbc5bbdd05980ffe29179b2fb6e6e691242e098d945d1601772cad0fef5fb6411e2a4b",
   "pnpm": {
