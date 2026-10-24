@@ -360,6 +360,8 @@ type ContextModeState = {
   routingBlock: string;
   platform: AdapterPlatformType;
   toolSpecs: NativeToolSpec[];
+  /** SPEC hook-resilience: capabilities that failed to load and are running degraded (empty = healthy). */
+  degraded: string[];
   /**
    * Store one elided transcript payload under `label` and report whether it
    * landed. False means the bytes are NOT retrievable, and the caller must
@@ -389,7 +391,142 @@ type ContextModeState = {
  */
 type ContextHookOptions = { routingOncePerSession?: boolean };
 
-async function initState(projectDir: string, safeLog: LogSink): Promise<ContextModeState> {
+/**
+ * SPEC hook-resilience: injection points for resilience tests. Each
+ * path/db override lets a test force ONE capability to fail and assert the
+ * rest of the plugin still loads. Production callers pass nothing and get
+ * the real resolutions.
+ */
+type InitStateDeps = {
+  routingPath?: string;
+  routingBlockPath?: string;
+  toolNamingPath?: string;
+  autoInjectionPath?: string;
+  dbPath?: string;
+};
+
+/**
+ * Deliberate routing denial thrown by `handlers.before` to block a tool
+ * call. `failSafe` rethrows these untouched — a deny is a decision, not a
+ * failure. Extends Error so every host (v1 hook islands and the v2 plugin
+ * API alike), which treats any throw as "block the call", keeps its exact
+ * behavior.
+ */
+class RoutingDenyError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "RoutingDenyError";
+  }
+}
+
+/** Consecutive failures before a hook is disabled for the rest of the process. */
+const HOOK_FAILURE_THRESHOLD = 3;
+
+/**
+ * Per-process hook health, keyed by hook name. Three consecutive failures
+ * of the same hook mean something is systematically broken (host shape
+ * drift, corrupt state), so the hook is disabled instead of failing every
+ * turn.
+ */
+const hookHealth = new Map<string, { consecutive: number; disabled: boolean }>();
+
+/** Fire-and-forget log that can never throw or reject into the caller. */
+function logSafe(safeLog: LogSink, message: string, extra?: PluginClientAppLogBodyExtra): void {
+  try {
+    void Promise.resolve(safeLog(message, extra)).catch(() => {});
+  } catch {
+    // A throwing sink must not break the failure path itself.
+  }
+}
+
+/**
+ * SPEC hook-resilience: fail-safe boundary around every hook handler —
+ * the one choke point that guarantees an internal error NEVER reaches the
+ * host turn loop.
+ *
+ * - a deliberate RoutingDenyError rethrows (blocking decisions still block);
+ * - anything else is described, reported via safeLog, and degrades to the
+ *   passthrough value (undefined — every hook treats it as "no change");
+ * - after HOOK_FAILURE_THRESHOLD consecutive failures the hook is disabled
+ *   for the rest of the process (one log line, then silent passthrough).
+ */
+function failSafe<A extends unknown[], R>(hookName: string, safeLog: LogSink, fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  return async (...args: A): Promise<R> => {
+    const health = hookHealth.get(hookName);
+    if (health?.disabled) return undefined as R;
+    try {
+      const result = await fn(...args);
+      if (health) health.consecutive = 0;
+      return result;
+    } catch (error) {
+      if (error instanceof RoutingDenyError) throw error;
+      const entry = health ?? { consecutive: 0, disabled: false };
+      entry.consecutive += 1;
+      hookHealth.set(hookName, entry);
+      if (entry.consecutive >= HOOK_FAILURE_THRESHOLD) {
+        if (!entry.disabled) {
+          entry.disabled = true;
+          logSafe(
+            safeLog,
+            `hook ${hookName} disabled after ${HOOK_FAILURE_THRESHOLD} consecutive failures — last error: ${describeError(error)}`,
+            { source: "hook-resilience" },
+          );
+        }
+      } else {
+        logSafe(
+          safeLog,
+          `hook ${hookName} failed (${entry.consecutive}/${HOOK_FAILURE_THRESHOLD}): ${describeError(error)} — degraded to passthrough`,
+          { source: "hook-resilience" },
+        );
+      }
+      return undefined as R;
+    }
+  };
+}
+
+/** Test-only: clear the per-process breaker state between tests. */
+function resetHookHealthForTests(): void {
+  hookHealth.clear();
+}
+
+/**
+ * SPEC hook-resilience: import a .mjs capability behind its own guard. A
+ * failed import records the capability in `degraded` and returns
+ * undefined — callers provide the fallback ("" / passthrough / no-op).
+ */
+async function importOptional(label: string, modulePath: string, degraded: string[], safeLog: LogSink): Promise<any> {
+  try {
+    return await import(pathToFileURL(modulePath).href);
+  } catch (error) {
+    degraded.push(label);
+    logSafe(safeLog, `${label} module failed to load (${describeError(error)}) — related features degrade gracefully`, {
+      source: "hook-resilience",
+    });
+    return undefined;
+  }
+}
+
+/**
+ * SPEC hook-resilience: drop-in stand-in for when the real SessionDB
+ * cannot open. Every method is a no-op and reads return empty values —
+ * callers already tolerate empty results ("no row → retry on next turn"),
+ * so capture, resume and compaction keep running without touching a
+ * broken database.
+ */
+function createNoopSessionDB(): SessionDB {
+  return {
+    cleanupOldSessions: () => undefined,
+    ensureSession: () => undefined,
+    insertEvent: () => undefined,
+    getEvents: () => [],
+    getSessionStats: () => ({}),
+    upsertResume: () => undefined,
+    incrementCompactCount: () => undefined,
+    claimLatestUnconsumedResume: () => undefined,
+  } as unknown as SessionDB;
+}
+
+async function initState(projectDir: string, safeLog: LogSink, deps: InitStateDeps = {}): Promise<ContextModeState> {
   // Resolve build dir from compiled JS location
   const platform = getPlatform();
   const adapter = new OpenCodeAdapter(platform);
@@ -412,41 +549,73 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
   // top of build/ — two levels up from this adapter directory.
   const buildRoot = resolve(buildDir, "..", "..");
 
+  // SPEC hook-resilience: every capability loads behind its own guard. A
+  // failed import degrades that capability (recorded in `degraded`) instead
+  // of rejecting initState and killing the whole plugin.
+  const degraded: string[] = [];
+
   // Load routing module (ESM .mjs, lives outside build/ in hooks/)
-  const routingPath = resolve(buildDir, "..", "..", "..", "hooks", "core", "routing.mjs");
-  const routing = await import(pathToFileURL(routingPath).href);
-  await routing.initSecurity(buildRoot);
+  const routingPath = deps.routingPath ?? resolve(buildDir, "..", "..", "..", "hooks", "core", "routing.mjs");
+  let routing: any;
+  try {
+    routing = await import(pathToFileURL(routingPath).href);
+  } catch (error) {
+    degraded.push("routing");
+    routing = { routePreToolUse: () => null };
+    logSafe(safeLog, `routing module failed to load (${describeError(error)}) — routing enforcement off, tools run unrouted`, {
+      source: "hook-resilience",
+    });
+  }
+  try {
+    await routing.initSecurity?.(buildRoot);
+  } catch (error) {
+    degraded.push("security");
+    logSafe(safeLog, `security policy init failed (${describeError(error)}) — routing keeps its built-in default policy`, {
+      source: "hook-resilience",
+    });
+  }
 
   // OC-1 / OC-3: Load hook helpers once at plugin init. Dynamic import keeps
   // the .mjs ESM islands isolated from the .ts compile graph.
-  const routingBlockPath = resolve(buildDir, "..", "..", "..", "hooks", "routing-block.mjs");
-  const routingBlockMod = await import(pathToFileURL(routingBlockPath).href);
-  const toolNamingPath = resolve(buildDir, "..", "..", "..", "hooks", "core", "tool-naming.mjs");
-  const toolNamingMod = await import(pathToFileURL(toolNamingPath).href);
-  const autoInjectionPath = resolve(buildDir, "..", "..", "..", "hooks", "auto-injection.mjs");
-  const autoInjectionMod = await import(pathToFileURL(autoInjectionPath).href);
+  const routingBlockPath = deps.routingBlockPath ?? resolve(buildDir, "..", "..", "..", "hooks", "routing-block.mjs");
+  const toolNamingPath = deps.toolNamingPath ?? resolve(buildDir, "..", "..", "..", "hooks", "core", "tool-naming.mjs");
+  const autoInjectionPath = deps.autoInjectionPath ?? resolve(buildDir, "..", "..", "..", "hooks", "auto-injection.mjs");
+  const routingBlockMod = await importOptional("routing-block", routingBlockPath, degraded, safeLog);
+  const toolNamingMod = await importOptional("tool-naming", toolNamingPath, degraded, safeLog);
+  const autoInjectionMod = await importOptional("auto-injection", autoInjectionPath, degraded, safeLog);
 
   // Pre-build the routing block once per process — it is platform-specific
   // (tool naming differs between opencode and kilo) but does NOT depend on
   // sessionID, so we cache it. createToolNamer accepts both "opencode" and
   // "kilo" per hooks/core/tool-naming.mjs:25-26.
-  const toolNamer = toolNamingMod.createToolNamer(platform);
-  const routingBlock: string = routingBlockMod.createRoutingBlock(toolNamer);
+  const toolNamer = toolNamingMod?.createToolNamer?.(platform) ?? ((name: string) => name);
+  const routingBlock: string = routingBlockMod?.createRoutingBlock?.(toolNamer) ?? "";
 
   // We do NOT fabricate a sessionId here — OpenCode/Kilo provide the real
   // session ID on every hook, and a process-global UUID would (a) never match
   // prior-session resume rows and (b) collide across multi-session reuse
   // (Mickey / PR #376 root cause).
   // C2 narrowing: resolve DB path through the canonical helper directly.
-  const db = new SessionDB({
-    dbPath: resolveSessionDbPath({
+  let db: SessionDB;
+  const dbPath =
+    deps.dbPath ??
+    resolveSessionDbPath({
       projectDir,
       sessionsDir: adapter.getSessionDir(),
-    }),
-  });
-
-  // Clean up old sessions on startup (no SessionStart hook to do this).
-  db.cleanupOldSessions(7);
+    });
+  try {
+    db = new SessionDB({ dbPath });
+    // Clean up old sessions on startup (no SessionStart hook to do this).
+    db.cleanupOldSessions(7);
+  } catch (error) {
+    degraded.push("session-db");
+    db = createNoopSessionDB();
+    logSafe(
+      safeLog,
+      `SessionDB failed to open at ${dbPath} (${describeError(error)}) — event capture and resume snapshots disabled for this process`,
+      { source: "hook-resilience" },
+    );
+  }
 
   // OC-4 (#487 follow-up): per-session capture gate. Keyed by sessionId (NOT
   // projectDir) so multi-session reuse within a long-lived plugin process
@@ -618,7 +787,7 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
 
       if (decision.action === "deny" || decision.action === "ask") {
         // Throw to block — OpenCode catches this and denies the tool call
-        throw new Error(decision.reason ?? "Blocked by open-context-mode");
+        throw new RoutingDenyError(decision.reason ?? "Blocked by open-context-mode");
       }
 
       if (decision.action === "modify" && decision.updatedInput) {
@@ -745,7 +914,7 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
         // P3 skills / P4 intent — ≤500 tokens / ~2000 chars per
         // hooks/auto-injection.mjs).
         try {
-          const autoBlock: string = autoInjectionMod.buildAutoInjection(events, "compaction");
+          const autoBlock = autoInjectionMod?.buildAutoInjection(events, "compaction");
           if (autoBlock && autoBlock.length > 0) {
             output.context.push(autoBlock);
           }
@@ -782,7 +951,7 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
       // rules (e.g. via AGENTS.md / CLAUDE.md loaded by the host). v2 also
       // gates on once-per-session (see ContextHookOptions).
       const alreadyInjected = opts?.routingOncePerSession === true && routingBlockInjected.has(sessionId);
-      if (Array.isArray(output?.system) && !alreadyInjected) {
+      if (routingBlock !== "" && Array.isArray(output?.system) && !alreadyInjected) {
         if (!systemHasRoutingInstructions(systemPartTexts(output.system))) {
           try {
             injectSystemText(output.system, 1, routingBlock);
@@ -832,7 +1001,27 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
     },
   };
 
-  const toolSpecs = await buildToolSpecs();
+  // SPEC hook-resilience: bind every handler through the fail-safe boundary —
+  // one choke point for both API generations. An internal error never reaches
+  // the host turn loop; a deliberate RoutingDenyError (deny/ask) still
+  // rethrows so blocking decisions keep blocking. After HOOK_FAILURE_THRESHOLD
+  // consecutive failures a hook disables itself instead of failing every turn.
+  handlers.before = failSafe("tool.execute.before", safeLog, handlers.before);
+  handlers.after = failSafe("tool.execute.after", safeLog, handlers.after);
+  handlers.onEvent = failSafe("event", safeLog, handlers.onEvent);
+  handlers.onPrompt = failSafe("chat.message", safeLog, handlers.onPrompt);
+  handlers.onCompaction = failSafe("session.compacting", safeLog, handlers.onCompaction);
+  handlers.onContext = failSafe("chat.system.transform", safeLog, handlers.onContext);
+
+  let toolSpecs: NativeToolSpec[] = [];
+  try {
+    toolSpecs = await buildToolSpecs();
+  } catch (error) {
+    degraded.push("open_ctx-tools");
+    logSafe(safeLog, `open_ctx_* tools failed to register (${describeError(error)}) — the tools are unavailable this session`, {
+      source: "hook-resilience",
+    });
+  }
 
   /**
    * Store a transcript payload in the content store, keyed by the elision
@@ -857,6 +1046,10 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
     }
   }
 
+  if (degraded.length > 0) {
+    logSafe(safeLog, `open-context-mode running degraded: ${degraded.join(", ")} unavailable`, { source: "hook-resilience" });
+  }
+
   return {
     projectDir,
     db,
@@ -864,6 +1057,7 @@ async function initState(projectDir: string, safeLog: LogSink): Promise<ContextM
     routingBlock,
     platform,
     toolSpecs,
+    degraded,
     indexForElision,
     captureAgentsMd,
     safeLog,
@@ -1354,3 +1548,7 @@ export { usageDelta, readUsageSnapshot };
 export type { UsageSnapshot };
 // Test surface — exported for unit testing the quorum substring fix (#487).
 export { systemHasRoutingInstructions, ROUTING_MARKERS };
+
+// Hook resilience (SPEC hook-resilience) — exported for unit testing.
+export { failSafe, RoutingDenyError, initState, resetHookHealthForTests };
+export type { InitStateDeps };
