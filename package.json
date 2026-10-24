@@ -1,6 +1,6 @@
 {
   "name": "open-context-mode",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "type": "module",
   "description": "OpenCode plugin + MCP server that saves 98% of your context window. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
   "author": "Mert Koseoğlu",
