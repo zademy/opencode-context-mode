@@ -18,7 +18,7 @@ Out of scope: new product features, adoption/marketing, large rewrites.
 
 | Module | Responsibility | Depends on | Status |
 |---|---|---|---|
-| `hook-resilience` | Hook callbacks and init never break the host turn: fail-safe boundary, degraded init, diagnosable errors | — | Draft spec |
+| `hook-resilience` | Hook callbacks and init never break the host turn: fail-safe boundary, degraded init, diagnosable errors | — | **Implemented 2026-10-24** (v2 + init; v1 covered free via shared initState choke point) — see SPEC-hook-resilience.md |
 | `store-resilience` | FTS5/SQLite corruption and unexpected states: heal, rebuild, or degrade to linear search without killing the session | — | Not started |
 | `executor-resilience` | Sandbox (PolyglotExecutor): guaranteed timeouts, orphan-process cleanup, runtime failures reported without hanging the tool | — | Not started |
 | `v2-compat` | Defensive compat with OpenCode V2: drift detection (event shapes, tool names, hook registration, routing-block splice), version-aware degradation | `hook-resilience` | Not started |
@@ -29,3 +29,7 @@ Out of scope: new product features, adoption/marketing, large rewrites.
 `hook-resilience` → `store-resilience` ∥ `executor-resilience` (parallel) → `v2-compat` → `diagnostics`
 
 Rationale: `hook-resilience` establishes the fail-safe pattern the others consume; `v2-compat` requires hooks that already fail safely; `diagnostics` verifies everything else, so it lands last.
+
+## Session Log
+
+- **2026-10-24:** `hook-resilience` implemented. 8 new tests; suite 3085 passed / 26 skipped / 0 failures. `sh-posix-guard` sweep scoped to project runtime scripts (`.agents/` skills excluded — agent-owned assets, not plugin runtime). Released as 3.3.0. Next: `store-resilience` or `executor-resilience`.
