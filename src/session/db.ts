@@ -1212,7 +1212,10 @@ export class SessionDB {
 
     // Atomic: dedup check + eviction + insert in a single transaction
     // to prevent race conditions from concurrent hook calls.
-    const transaction = this.db.transaction(() => {
+    // Plain thunk — the transaction OBJECT binds to the connection it was built
+    // on, so it is constructed inside the retried closure: a corruption heal
+    // replaces the connection and a pre-heal binding is dead on retry.
+    const work = () => {
       // Deduplication check: same type + data_hash in last N events
       const dup = this.stmt(S.checkDuplicate).get(sessionId, DEDUP_WINDOW, event.type, dataHash);
       if (dup) return;
@@ -1244,9 +1247,9 @@ export class SessionDB {
 
       // Update meta if session exists
       this.stmt(S.updateMetaLastEvent).run(sessionId);
-    });
+    };
 
-    this.withRetry(() => transaction());
+    this.withRetry(() => this.db.transaction(work)());
   }
 
   /**
@@ -1302,7 +1305,9 @@ export class SessionDB {
       };
     });
 
-    const transaction = this.db.transaction(() => {
+    // Same re-bind rule as insertEvent: build the transaction inside the
+    // retried closure so a corruption heal retries on the reopened connection.
+    const work = () => {
       let cnt = (this.stmt(S.getEventCount).get(sessionId) as { cnt: number }).cnt;
       for (const row of prepared) {
         const dup = this.stmt(S.checkDuplicate).get(sessionId, DEDUP_WINDOW, row.event.type, row.dataHash);
@@ -1328,9 +1333,9 @@ export class SessionDB {
         );
       }
       this.stmt(S.updateMetaLastEvent).run(sessionId);
-    });
+    };
 
-    this.withRetry(() => transaction());
+    this.withRetry(() => this.db.transaction(work)());
   }
 
   /**
@@ -1349,24 +1354,28 @@ export class SessionDB {
     const type = opts?.type;
     const maxPriority = opts?.maxPriority;
 
-    if (type && maxPriority !== undefined) {
-      return this.stmt(S.getEventsByTypeAndPriority).all(sessionId, type, maxPriority, limit) as StoredEvent[];
-    }
-    if (type) {
-      return this.stmt(S.getEventsByType).all(sessionId, type, limit) as StoredEvent[];
-    }
-    if (maxPriority !== undefined) {
-      return this.stmt(S.getEventsByPriority).all(sessionId, maxPriority, limit) as StoredEvent[];
-    }
-    return this.stmt(S.getEvents).all(sessionId, limit) as StoredEvent[];
+    return this.withRetry(() => {
+      if (type && maxPriority !== undefined) {
+        return this.stmt(S.getEventsByTypeAndPriority).all(sessionId, type, maxPriority, limit) as StoredEvent[];
+      }
+      if (type) {
+        return this.stmt(S.getEventsByType).all(sessionId, type, limit) as StoredEvent[];
+      }
+      if (maxPriority !== undefined) {
+        return this.stmt(S.getEventsByPriority).all(sessionId, maxPriority, limit) as StoredEvent[];
+      }
+      return this.stmt(S.getEvents).all(sessionId, limit) as StoredEvent[];
+    });
   }
 
   /**
    * Get the total event count for a session.
    */
   getEventCount(sessionId: string): number {
-    const row = this.stmt(S.getEventCount).get(sessionId) as { cnt: number };
-    return row.cnt;
+    return this.withRetry(() => {
+      const row = this.stmt(S.getEventCount).get(sessionId) as { cnt: number };
+      return row.cnt;
+    });
   }
 
   /**
@@ -1380,9 +1389,9 @@ export class SessionDB {
    * panel without scanning every event row in JS.
    */
   getEventBytesSummary(sessionId: string): { bytesAvoided: number; bytesReturned: number } {
-    const row = this.stmt(S.getEventBytesSummary).get(sessionId) as
-      | { bytes_avoided: number | null; bytes_returned: number | null }
-      | undefined;
+    const row = this.withRetry(
+      () => this.stmt(S.getEventBytesSummary).get(sessionId) as { bytes_avoided: number | null; bytes_returned: number | null } | undefined,
+    );
     return {
       bytesAvoided: Number(row?.bytes_avoided ?? 0),
       bytesReturned: Number(row?.bytes_returned ?? 0),
@@ -1393,7 +1402,7 @@ export class SessionDB {
    * Return the most recently attributed project dir for a session.
    */
   getLatestAttributedProjectDir(sessionId: string): string | null {
-    const row = this.stmt(S.getLatestAttributedProject).get(sessionId) as { project_dir: string } | undefined;
+    const row = this.withRetry(() => this.stmt(S.getLatestAttributedProject).get(sessionId) as { project_dir: string } | undefined);
     return row?.project_dir || null;
   }
 
@@ -1404,10 +1413,12 @@ export class SessionDB {
    */
   _getSessionProjectDir(sessionId: string): string {
     try {
-      const row = this.db.prepare("SELECT project_dir FROM session_meta WHERE session_id = ?").get(sessionId) as
-        | { project_dir: string }
-        | undefined;
-      return row?.project_dir || "";
+      return this.withRetry(() => {
+        const row = this.db.prepare("SELECT project_dir FROM session_meta WHERE session_id = ?").get(sessionId) as
+          | { project_dir: string }
+          | undefined;
+        return row?.project_dir || "";
+      });
     } catch {
       return "";
     }
@@ -1438,14 +1449,17 @@ export class SessionDB {
     try {
       const escapedQuery = query.replace(/[%_]/g, (char) => "\\" + char);
       const sourceParam = source ?? null;
-      return this.stmt(S.searchEvents).all(projectDir, escapedQuery, escapedQuery, sourceParam, sourceParam, limit) as Array<{
-        id: number;
-        session_id: string;
-        category: string;
-        type: string;
-        data: string;
-        created_at: string;
-      }>;
+      return this.withRetry(
+        () =>
+          this.stmt(S.searchEvents).all(projectDir, escapedQuery, escapedQuery, sourceParam, sourceParam, limit) as Array<{
+            id: number;
+            session_id: string;
+            category: string;
+            type: string;
+            data: string;
+            created_at: string;
+          }>,
+      );
     } catch {
       return [];
     }
@@ -1479,13 +1493,17 @@ export class SessionDB {
       // preserves the #737 project scope — distinct directories still differ
       // after normalization, so cross-project isolation is intact.
       const normalized = normalizeWorktreePath(projectDir);
-      const rows = this.db
-        .prepare(
-          `SELECT DISTINCT session_id
-             FROM session_events
-            WHERE RTRIM(REPLACE(project_dir, '\\', '/'), '/') = ?`,
-        )
-        .all(normalized) as Array<{ session_id: string }>;
+      const rows = this.withRetry(
+        () =>
+          this.db
+            .prepare(
+              `SELECT DISTINCT session_id
+               FROM session_events
+              WHERE RTRIM(REPLACE(project_dir, '\\', '/'), '/') = ?`,
+            )
+            .all(normalized) as Array<{ session_id: string }>,
+      );
+      return rows.map((r) => r.session_id);
       return rows.map((r) => r.session_id);
     } catch {
       return [];
@@ -1501,14 +1519,16 @@ export class SessionDB {
    * `projectDir` is the session origin directory, not per-event attribution.
    */
   ensureSession(sessionId: string, projectDir: string): void {
-    this.stmt(S.ensureSession).run(sessionId, projectDir);
+    this.withRetry(() => {
+      this.stmt(S.ensureSession).run(sessionId, projectDir);
+    });
   }
 
   /**
    * Get session statistics/metadata.
    */
   getSessionStats(sessionId: string): SessionMeta | null {
-    const row = this.stmt(S.getSessionStats).get(sessionId) as SessionMeta | undefined;
+    const row = this.withRetry(() => this.stmt(S.getSessionStats).get(sessionId) as SessionMeta | undefined);
     return row ?? null;
   }
 
@@ -1525,9 +1545,11 @@ export class SessionDB {
    * a snapshot from an empty session (first event into a fresh DB).
    */
   getSessionRollup(sessionId: string): SessionRollup {
-    const main = this.stmt(S.getSessionRollup).get(sessionId) as Partial<SessionRollup> | undefined;
-    const maxRow = this.stmt(S.getMaxFileEdits).get(sessionId) as { max_file_edits?: number } | undefined;
-    const commitRow = this.stmt(S.getLatestCommitMessage).get(sessionId) as { data?: string } | undefined;
+    const { main, maxRow, commitRow } = this.withRetry(() => ({
+      main: this.stmt(S.getSessionRollup).get(sessionId) as Partial<SessionRollup> | undefined,
+      maxRow: this.stmt(S.getMaxFileEdits).get(sessionId) as { max_file_edits?: number } | undefined,
+      commitRow: this.stmt(S.getLatestCommitMessage).get(sessionId) as { data?: string } | undefined,
+    }));
     const meta = this.getSessionStats(sessionId);
 
     // edit_test_cycles: heuristic — min(file edits, errors) approximates
@@ -1560,7 +1582,9 @@ export class SessionDB {
    * Increment the compact_count for a session (tracks snapshot rebuilds).
    */
   incrementCompactCount(sessionId: string): void {
-    this.stmt(S.incrementCompactCount).run(sessionId);
+    this.withRetry(() => {
+      this.stmt(S.incrementCompactCount).run(sessionId);
+    });
   }
 
   /**
@@ -1569,7 +1593,7 @@ export class SessionDB {
    * Returns null when unset (first Stop) or the session row is absent.
    */
   getUsageCursor(sessionId: string): string | null {
-    const row = this.stmt(S.getUsageCursor).get(sessionId) as { usage_cursor: string | null } | undefined;
+    const row = this.withRetry(() => this.stmt(S.getUsageCursor).get(sessionId) as { usage_cursor: string | null } | undefined);
     return row?.usage_cursor ?? null;
   }
 
@@ -1578,7 +1602,9 @@ export class SessionDB {
    * session_meta row does not exist yet (callers ensureSession first).
    */
   setUsageCursor(sessionId: string, uuid: string): void {
-    this.stmt(S.setUsageCursor).run(uuid, sessionId);
+    this.withRetry(() => {
+      this.stmt(S.setUsageCursor).run(uuid, sessionId);
+    });
   }
 
   // ═══════════════════════════════════════════
@@ -1589,14 +1615,16 @@ export class SessionDB {
    * Upsert a resume snapshot for a session. Resets consumed flag on update.
    */
   upsertResume(sessionId: string, snapshot: string, eventCount?: number): void {
-    this.stmt(S.upsertResume).run(sessionId, snapshot, eventCount ?? 0);
+    this.withRetry(() => {
+      this.stmt(S.upsertResume).run(sessionId, snapshot, eventCount ?? 0);
+    });
   }
 
   /**
    * Retrieve the resume snapshot for a session.
    */
   getResume(sessionId: string): ResumeRow | null {
-    const row = this.stmt(S.getResume).get(sessionId) as ResumeRow | undefined;
+    const row = this.withRetry(() => this.stmt(S.getResume).get(sessionId) as ResumeRow | undefined);
     return row ?? null;
   }
 
@@ -1604,7 +1632,9 @@ export class SessionDB {
    * Mark the resume snapshot as consumed (already injected into conversation).
    */
   markResumeConsumed(sessionId: string): void {
-    this.stmt(S.markResumeConsumed).run(sessionId);
+    this.withRetry(() => {
+      this.stmt(S.markResumeConsumed).run(sessionId);
+    });
   }
 
   /**
@@ -1628,9 +1658,11 @@ export class SessionDB {
    * Returns null when no unconsumed snapshot exists for any other session.
    */
   claimLatestUnconsumedResume(currentSessionId: string): { sessionId: string; snapshot: string } | null {
-    const row = this.stmt(S.claimLatestUnconsumedResume).get(currentSessionId) as { session_id: string; snapshot: string } | undefined;
-    if (!row) return null;
-    return { sessionId: row.session_id, snapshot: row.snapshot };
+    return this.withRetry(() => {
+      const row = this.stmt(S.claimLatestUnconsumedResume).get(currentSessionId) as { session_id: string; snapshot: string } | undefined;
+      if (!row) return null;
+      return { sessionId: row.session_id, snapshot: row.snapshot };
+    });
   }
 
   /**
@@ -1640,10 +1672,12 @@ export class SessionDB {
    */
   getLatestSessionId(): string | null {
     try {
-      const row = this.db.prepare("SELECT session_id FROM session_meta ORDER BY started_at DESC LIMIT 1").get() as
-        | { session_id?: string }
-        | undefined;
-      return row?.session_id ?? null;
+      return this.withRetry(() => {
+        const row = this.db.prepare("SELECT session_id FROM session_meta ORDER BY started_at DESC LIMIT 1").get() as
+          | { session_id?: string }
+          | undefined;
+        return row?.session_id ?? null;
+      });
     } catch {
       return null;
     }
@@ -1661,7 +1695,9 @@ export class SessionDB {
   incrementToolCall(sessionId: string, tool: string, bytesReturned: number = 0): void {
     const safeBytes = Number.isFinite(bytesReturned) && bytesReturned > 0 ? Math.round(bytesReturned) : 0;
     try {
-      this.stmt(S.incrementToolCall).run(sessionId, tool, safeBytes);
+      this.withRetry(() => {
+        this.stmt(S.incrementToolCall).run(sessionId, tool, safeBytes);
+      });
     } catch {
       // best-effort: counter must never throw and break the parent call
     }
@@ -1673,12 +1709,14 @@ export class SessionDB {
    */
   getToolCallStats(sessionId: string): ToolCallStats {
     try {
-      const totals = this.stmt(S.getToolCallTotals).get(sessionId) as { calls: number; bytes_returned: number } | undefined;
-      const rows = this.stmt(S.getToolCallByTool).all(sessionId) as Array<{
-        tool: string;
-        calls: number;
-        bytes_returned: number;
-      }>;
+      const { totals, rows } = this.withRetry(() => ({
+        totals: this.stmt(S.getToolCallTotals).get(sessionId) as { calls: number; bytes_returned: number } | undefined,
+        rows: this.stmt(S.getToolCallByTool).all(sessionId) as Array<{
+          tool: string;
+          calls: number;
+          bytes_returned: number;
+        }>,
+      }));
 
       const byTool: ToolCallStats["byTool"] = {};
       for (const row of rows) {
@@ -1706,24 +1744,28 @@ export class SessionDB {
    * Delete all data for a session (events, meta, resume).
    */
   deleteSession(sessionId: string): void {
-    this.db.transaction(() => {
-      this.stmt(S.deleteEvents).run(sessionId);
-      this.stmt(S.deleteResume).run(sessionId);
-      this.stmt(S.deleteMeta).run(sessionId);
-    })();
+    this.withRetry(() =>
+      this.db.transaction(() => {
+        this.stmt(S.deleteEvents).run(sessionId);
+        this.stmt(S.deleteResume).run(sessionId);
+        this.stmt(S.deleteMeta).run(sessionId);
+      })(),
+    );
   }
 
   /**
    * Remove sessions older than maxAgeDays. Returns the count of deleted sessions.
    */
   cleanupOldSessions(maxAgeDays: number = 7): number {
-    const negDays = `-${maxAgeDays}`;
-    const oldSessions = this.stmt(S.getOldSessions).all(negDays) as Array<{ session_id: string }>;
+    return this.withRetry(() => {
+      const negDays = `-${maxAgeDays}`;
+      const oldSessions = this.stmt(S.getOldSessions).all(negDays) as Array<{ session_id: string }>;
 
-    for (const { session_id } of oldSessions) {
-      this.deleteSession(session_id);
-    }
+      for (const { session_id } of oldSessions) {
+        this.deleteSession(session_id);
+      }
 
-    return oldSessions.length;
+      return oldSessions.length;
+    });
   }
 }

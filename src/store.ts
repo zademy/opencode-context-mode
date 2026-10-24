@@ -9,7 +9,7 @@
  */
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { openSQLite, withRetry, startWalCheckpointTimer } from "./db-base.js";
+import { openSQLite, startWalCheckpointTimer } from "./db-base.js";
 import type { PreparedStatement, SQLiteHandle } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -1277,24 +1277,30 @@ export class ContentStore {
   ): SearchResult[] {
     const sanitized = sanitizeQuery(query, mode);
 
-    let stmt: PreparedStatement;
-    let params: unknown[];
+    // store-resilience: pick + execute inside the healed handle seam.
+    // Statements re-resolve per attempt — a corruption heal re-runs
+    // prepareStatements, and a statement captured outside this closure
+    // would point at the closed pre-heal connection.
+    return this.#handle.withRetry(() => {
+      let stmt: PreparedStatement;
+      let params: unknown[];
 
-    if (source && contentType) {
-      stmt = sourceMatchMode === "exact" ? this.#stmtSearchPorterExactContentType : this.#stmtSearchPorterFilteredContentType;
-      params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), contentType, limit];
-    } else if (source) {
-      stmt = sourceMatchMode === "exact" ? this.#stmtSearchPorterExact : this.#stmtSearchPorterFiltered;
-      params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), limit];
-    } else if (contentType) {
-      stmt = this.#stmtSearchPorterContentType;
-      params = [sanitized, contentType, limit];
-    } else {
-      stmt = this.#stmtSearchPorter;
-      params = [sanitized, limit];
-    }
+      if (source && contentType) {
+        stmt = sourceMatchMode === "exact" ? this.#stmtSearchPorterExactContentType : this.#stmtSearchPorterFilteredContentType;
+        params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), contentType, limit];
+      } else if (source) {
+        stmt = sourceMatchMode === "exact" ? this.#stmtSearchPorterExact : this.#stmtSearchPorterFiltered;
+        params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), limit];
+      } else if (contentType) {
+        stmt = this.#stmtSearchPorterContentType;
+        params = [sanitized, contentType, limit];
+      } else {
+        stmt = this.#stmtSearchPorter;
+        params = [sanitized, limit];
+      }
 
-    return withRetry(() => this.#mapSearchRows(stmt.all(...params) as SearchRow[]));
+      return this.#mapSearchRows(stmt.all(...params) as SearchRow[]);
+    });
   }
 
   // ── Trigram Search (Layer 2) ──
@@ -1310,24 +1316,27 @@ export class ContentStore {
     const sanitized = sanitizeTrigramQuery(query, mode);
     if (!sanitized) return [];
 
-    let stmt: PreparedStatement;
-    let params: unknown[];
+    // store-resilience: same healed-seam + re-resolution rule as search().
+    return this.#handle.withRetry(() => {
+      let stmt: PreparedStatement;
+      let params: unknown[];
 
-    if (source && contentType) {
-      stmt = sourceMatchMode === "exact" ? this.#stmtSearchTrigramExactContentType : this.#stmtSearchTrigramFilteredContentType;
-      params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), contentType, limit];
-    } else if (source) {
-      stmt = sourceMatchMode === "exact" ? this.#stmtSearchTrigramExact : this.#stmtSearchTrigramFiltered;
-      params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), limit];
-    } else if (contentType) {
-      stmt = this.#stmtSearchTrigramContentType;
-      params = [sanitized, contentType, limit];
-    } else {
-      stmt = this.#stmtSearchTrigram;
-      params = [sanitized, limit];
-    }
+      if (source && contentType) {
+        stmt = sourceMatchMode === "exact" ? this.#stmtSearchTrigramExactContentType : this.#stmtSearchTrigramFilteredContentType;
+        params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), contentType, limit];
+      } else if (source) {
+        stmt = sourceMatchMode === "exact" ? this.#stmtSearchTrigramExact : this.#stmtSearchTrigramFiltered;
+        params = [sanitized, this.#sourceFilterParam(source, sourceMatchMode), limit];
+      } else if (contentType) {
+        stmt = this.#stmtSearchTrigramContentType;
+        params = [sanitized, contentType, limit];
+      } else {
+        stmt = this.#stmtSearchTrigram;
+        params = [sanitized, limit];
+      }
 
-    return withRetry(() => this.#mapSearchRows(stmt.all(...params) as SearchRow[]));
+      return this.#mapSearchRows(stmt.all(...params) as SearchRow[]);
+    });
   }
 
   // ── Fuzzy Correction (Layer 3) ──
@@ -1549,14 +1558,17 @@ export class ContentStore {
    */
   #refreshStaleSources(): void {
     this.lastRefreshCount = 0;
-    const sources = this.#db
-      .prepare("SELECT label, file_path, content_hash, indexed_at FROM sources WHERE file_path IS NOT NULL")
-      .all() as Array<{
-      label: string;
-      file_path: string;
-      content_hash: string;
-      indexed_at: string;
-    }>;
+    // store-resilience: healed seam — a transient lock or mid-session
+    // corruption on this read no longer kills the whole refresh pass.
+    const sources = this.#handle.withRetry(
+      () =>
+        this.#db.prepare("SELECT label, file_path, content_hash, indexed_at FROM sources WHERE file_path IS NOT NULL").all() as Array<{
+          label: string;
+          file_path: string;
+          content_hash: string;
+          indexed_at: string;
+        }>,
+    );
 
     for (const src of sources) {
       try {
@@ -1651,15 +1663,19 @@ export class ContentStore {
     totalSources: number;
     lastIndexedAt?: string;
   } {
-    const row = this.#db
-      .prepare(
-        "SELECT COALESCE(SUM(chunk_count), 0) AS total_chunks, COUNT(*) AS total_sources, MAX(indexed_at) AS last_indexed_at FROM sources",
-      )
-      .get() as {
-      total_chunks: number;
-      total_sources: number;
-      last_indexed_at: string | null;
-    };
+    // store-resilience: healed seam, same as the search paths.
+    const row = this.#handle.withRetry(
+      () =>
+        this.#db
+          .prepare(
+            "SELECT COALESCE(SUM(chunk_count), 0) AS total_chunks, COUNT(*) AS total_sources, MAX(indexed_at) AS last_indexed_at FROM sources",
+          )
+          .get() as {
+          total_chunks: number;
+          total_sources: number;
+          last_indexed_at: string | null;
+        },
+    );
     return {
       totalChunks: row.total_chunks ?? 0,
       totalSources: row.total_sources ?? 0,
