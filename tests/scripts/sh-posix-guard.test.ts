@@ -33,13 +33,17 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
 const GUARD_EXEC = 'exec bash "$0" "$@"';
 const SYNTAX_ERROR_SIGNATURE = "syntax error near unexpected token";
 
-/** Every tracked shell script must carry the guard — including future ones. */
+/** Every tracked project shell script must carry the guard — including future ones.
+ * Agent-skill assets (.agents/skills/**) are out of scope: they are
+ * agent-invoked (bash) helpers owned separately from the plugin, not
+ * runtime scripts that plugin validation may invoke via a POSIX sh. */
 const SCRIPTS = execFileSync("git", ["ls-files", "*.sh"], {
   cwd: REPO_ROOT,
   encoding: "utf8",
 })
   .split("\n")
-  .filter(Boolean);
+  .filter(Boolean)
+  .filter((path) => !path.startsWith(".agents/"));
 
 describe("shell scripts carry the POSIX-sh re-exec guard (#1242)", () => {
   it("discovers the guarded scripts (inventory sanity)", () => {
