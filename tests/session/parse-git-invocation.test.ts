@@ -12,7 +12,7 @@
  * cwd event emitted by extractGit must carry the expanded scopedDir.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { homedir } from "node:os";
 import { extractEvents } from "../../src/session/extract.js";
 

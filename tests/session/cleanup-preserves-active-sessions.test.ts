@@ -21,7 +21,7 @@
  * is evicted). Modeled on cleanup-preserves-live-uuid-events.test.ts.
  */
 
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";

@@ -3,7 +3,7 @@
  * relocates it. The multi-adapter rows are gone with the integrations; what
  * must not regress is the path itself.
  */
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { opencodeConfigDir } from "../../src/platforms/opencode/index.js";

@@ -13,7 +13,7 @@
  * without mocking Date or process.env.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { formatLocalDateTime } from "../../src/session/analytics-render.js";
 
 describe("formatLocalDateTime", () => {

@@ -7,7 +7,7 @@
  * .mjs hooks (hooks/session-helpers.mjs) consume — eliminating the
  * parallel JS implementation that drifted across rounds 5 and 6.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";

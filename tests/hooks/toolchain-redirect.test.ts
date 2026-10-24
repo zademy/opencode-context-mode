@@ -14,7 +14,7 @@
  * that only knows the POSIX spelling routes nothing there.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import { matchFloodingToolchain, toolchainTailCommand, toolchainFilterHint } from "../../hooks/core/routing.mjs";
 

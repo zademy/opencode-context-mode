@@ -5,7 +5,7 @@
  * using real fixtures from Context7 and MCP tools.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdtempSync, utimesSync } from "node:fs";
 import { join, dirname } from "node:path";

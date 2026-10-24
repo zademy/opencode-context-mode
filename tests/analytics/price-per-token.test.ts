@@ -15,7 +15,7 @@
  * every call. These tests pin that behavior.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vite-plus/test";
 import { pricePerToken, tokensToUsd, OPUS_INPUT_PRICE_PER_TOKEN } from "../../src/session/analytics-metrics.js";
 
 const ENV_NAME = "PI_OPEN_CONTEXT_MODE_PRICE_OUTPUT_PER_TOKEN";

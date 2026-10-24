@@ -17,7 +17,7 @@
  * writes against the same plan id.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function planExitEventsOf(toolInput: Record<string, unknown>, toolResponse: string = "") {

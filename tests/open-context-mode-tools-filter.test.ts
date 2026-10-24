@@ -1,5 +1,5 @@
 import "./setup-home";
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { parseContextModeToolsAllowlist, isContextModeToolEnabled } from "../src/util/tools-allowlist.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";

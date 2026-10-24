@@ -16,7 +16,7 @@
  * Runtime guard: invokes the exported helper against synthetic Node
  * versions and asserts the expected boolean.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 
@@ -230,15 +230,13 @@ describe("Issue #642 — loadDatabase() factory propagates busy_timeout", () => 
     let db: { pragma: (s: string) => unknown; close: () => void } | null = null;
     try {
       // The SessionDB + ContentStore ctors all open like this.
-      db = new (
-        Database as unknown as new (
-          p: string,
-          o: { timeout: number },
-        ) => {
-          pragma: (s: string) => unknown;
-          close: () => void;
-        }
-      )(dbPath, { timeout: 30000 });
+      db = new (Database as unknown as new (
+        p: string,
+        o: { timeout: number },
+      ) => {
+        pragma: (s: string) => unknown;
+        close: () => void;
+      })(dbPath, { timeout: 30000 });
       // Three driver shapes, one test:
       //   - BunSQLiteAdapter / NodeSQLiteAdapter: collapse single-row
       //     single-column PRAGMA to scalar (see pragma() in db-base.ts).

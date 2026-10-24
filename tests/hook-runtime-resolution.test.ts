@@ -14,7 +14,7 @@
  *     upgrade hints which must stay on node — better-sqlite3 ABI, #543).
  */
 
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vite-plus/test";
 
 // node:fs / node:child_process mocks below pin POSIX-shape bunFallbackPaths()
 // candidates (~/.bun/bin/bun). Windows resolves to %USERPROFILE%\.bun\bin\bun.exe

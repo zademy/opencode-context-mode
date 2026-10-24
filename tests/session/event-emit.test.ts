@@ -20,7 +20,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 import { loadDatabase } from "../../src/db-base.js";
 import { emitCacheHitEvent, emitIndexWriteEvent, emitSandboxExecuteEvent } from "../../src/session/event-emit.js";

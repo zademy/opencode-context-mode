@@ -384,7 +384,7 @@ open-context-mode index . --source project:my-app
 open-context-mode search "authentication middleware" --source project:my-app
 open-context-mode insight          # opens the hosted Insight dashboard in browser
 open-context-mode dashboard        # live local dashboard of your SQLite data (Ctrl+C to stop)
-npx tsx src/cli.ts dashboard  # same dashboard, run from the repo without a global install
+pnpm exec vpx src/cli.ts dashboard  # same dashboard, run from the repo without a global install
 bash scripts/open_ctx-debug.sh    # full diagnostic report for bug reports
 ```
 

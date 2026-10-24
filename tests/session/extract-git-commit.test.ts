@@ -11,7 +11,7 @@
  * starts RED today; the fix will flip them to GREEN one tracer at a time.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function dataOf(cmd: string): string | undefined {

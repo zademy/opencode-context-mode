@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { execFileSync } from "node:child_process";
 import { detectLocaleAndTz } from "../../src/session/analytics-render.js";
 

@@ -18,7 +18,7 @@
  * so the policy is testable without spinning up the MCP transport.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { FloodGuard } from "../../src/search/flood-guard.js";
 
 const CFG = { windowMs: 60_000, softCapAfter: 3, blockAfter: 8 };

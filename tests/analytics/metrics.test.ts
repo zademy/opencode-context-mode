@@ -7,7 +7,7 @@
  * Schema: session_events, session_meta, session_resume
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vite-plus/test";
 import Database from "better-sqlite3";
 import { AnalyticsEngine } from "../../src/session/analytics-query.js";
 

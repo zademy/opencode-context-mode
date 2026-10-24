@@ -10,7 +10,7 @@
  * test in stats-output-format.test.ts pins the old $69.X output).
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { formatReport } from "../../src/session/analytics-render.js";
 import type { ConversationStats, FullReport, LifetimeStats, RealBytesStats } from "../../src/session/analytics-query.js";
 

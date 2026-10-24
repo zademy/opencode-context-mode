@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, beforeAll, afterAll } from "vite-plus/test";
 
 const SCRIPT = join(process.cwd(), "scripts", "assert-bundles-committed.mjs");
 

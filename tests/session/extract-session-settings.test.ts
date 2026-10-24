@@ -15,7 +15,7 @@
  *   - When no setting available, emits no event (avoid noisy fire)
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractSessionSettings } from "../../src/session/extract.js";
 
 describe("extractSessionSettings — Issue #4 (new PRD)", () => {

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vite-plus/test";
 import { _resetWorktreeSuffixCacheForTests, getWorktreeSuffix } from "../src/session/db.js";
 
 describe("getWorktreeSuffix", () => {

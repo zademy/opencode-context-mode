@@ -25,7 +25,7 @@
  * to prove that omitting the opt preserves the legacy renderer output.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { formatReport } from "../../src/session/analytics-render.js";
 import type { AdapterScanResult, FullReport, LifetimeStats, MultiAdapterLifetimeStats } from "../../src/session/analytics-query.js";
 

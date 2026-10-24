@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { buildPowerShellScriptContent, PolyglotExecutor } from "../../src/executor.js";
 import { detectRuntimes, type RuntimeMap } from "../../src/runtime.js";
 

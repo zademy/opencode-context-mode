@@ -7,7 +7,7 @@
  * XML escaping of all five reserved characters.
  */
 
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { truncateJSON, capBytes, escapeXML, charSafePrefix, charSafeSlice } from "../src/truncate.js";
 

@@ -18,7 +18,7 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 import { persistToolCallCounter, restoreSessionStats } from "../../src/session/persist-tool-calls.js";
 

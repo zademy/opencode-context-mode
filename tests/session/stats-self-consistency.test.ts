@@ -18,7 +18,7 @@
  * unit rounding.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 
 import { formatReport } from "../../src/session/analytics-render.js";
 

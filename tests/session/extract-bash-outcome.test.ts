@@ -11,7 +11,7 @@
  * never content.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function outcomeEventsOf(toolResponse: unknown) {

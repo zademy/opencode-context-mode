@@ -9,7 +9,7 @@
  * Privacy: capture sizes and line counts only, never file content.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function metaEventsOf(toolResponse: unknown) {

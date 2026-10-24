@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vite-plus/test";
 import { routePreToolUse, resetGuidanceThrottle, isStructurallyBounded } from "../../hooks/core/routing.mjs";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";

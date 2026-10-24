@@ -24,7 +24,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, beforeAll, afterAll } from "vite-plus/test";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_TS = resolve(__dirname, "../../src/server.ts");

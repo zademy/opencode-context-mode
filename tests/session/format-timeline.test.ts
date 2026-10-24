@@ -30,7 +30,7 @@
  * splice directly into the formatReport line buffer.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { renderHorizontalTimeline, type TimelineDay } from "../../src/session/analytics-render.js";
 
 function fixtureDays(): TimelineDay[] {

@@ -36,3 +36,4 @@ tools/pricing/litellm-catalog.json
 
 # Runtime state from local OpenCode sessions (error-explainer history is per-machine).
 /.opencode/
+.vitest/

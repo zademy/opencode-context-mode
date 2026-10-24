@@ -14,7 +14,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 import { extractUserEvents } from "../../src/session/extract.js";
 import { buildResumeSnapshot, type StoredEvent } from "../../src/session/snapshot.js";

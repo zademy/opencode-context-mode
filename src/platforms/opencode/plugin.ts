@@ -300,7 +300,8 @@ function injectSystemText(system: unknown[], index: number, text: string): void 
   // the provider prefix-cache fold survives), and sequential injections
   // append in call order.
   const first = system.find((p) => p !== null && typeof p === "object" && typeof (p as { text?: unknown }).text === "string") as
-    { text: string } | undefined;
+    | { text: string }
+    | undefined;
   if (first) {
     first.text = first.text.length > 0 ? first.text + "\n\n" + text : text;
     return;

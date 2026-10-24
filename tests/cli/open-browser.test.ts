@@ -8,7 +8,7 @@
  * and that no side-effect file is created when the function runs.
  */
 
-import { describe, test, expect, afterAll } from "vitest";
+import { describe, test, expect, afterAll } from "vite-plus/test";
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

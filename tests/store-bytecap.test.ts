@@ -8,7 +8,7 @@
  * chunk regardless of size) makes these tests fail — a stored chunk exceeds the
  * cap. With the fix, every persisted plain-text chunk is <= MAX_CHUNK_BYTES.
  */
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

@@ -10,7 +10,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { extractUserEvents } from "../../src/session/extract.js";
 import type { SessionEvent } from "../../src/session/extract.js";
 import { buildResumeSnapshot, type StoredEvent } from "../../src/session/snapshot.js";

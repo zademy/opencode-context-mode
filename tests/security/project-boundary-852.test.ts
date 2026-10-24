@@ -14,7 +14,7 @@
  * No regex in the implementation — pure `path.relative`/`path.resolve` math.
  */
 
-import { describe, it, expect, beforeAll, afterAll, test } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, test } from "vite-plus/test";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";

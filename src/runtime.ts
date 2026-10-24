@@ -37,7 +37,18 @@ function isWindowsSystemCmd(shellPath: string): boolean {
 }
 
 export type Language =
-  "javascript" | "typescript" | "python" | "shell" | "ruby" | "go" | "rust" | "php" | "perl" | "r" | "elixir" | "csharp";
+  | "javascript"
+  | "typescript"
+  | "python"
+  | "shell"
+  | "ruby"
+  | "go"
+  | "rust"
+  | "php"
+  | "perl"
+  | "r"
+  | "elixir"
+  | "csharp";
 
 export interface RuntimeMap {
   javascript: string | null;

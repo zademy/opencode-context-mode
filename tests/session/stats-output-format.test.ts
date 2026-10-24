@@ -7,7 +7,7 @@
  * #8: No business-value framing — must end with a "Bottom line" footer.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { formatReport } from "../../src/session/analytics-render.js";
 import { tokensToUsd } from "../../src/session/analytics-metrics.js";
 import type {

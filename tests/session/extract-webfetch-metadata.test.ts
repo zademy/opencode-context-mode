@@ -9,7 +9,7 @@
  * Privacy: capture host only, never full URL or query string.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function webfetchEventsOf(toolResponse: unknown) {

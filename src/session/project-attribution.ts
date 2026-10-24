@@ -41,7 +41,15 @@ export const ATTRIBUTION_CONFIDENCE = {
 } as const;
 
 export type AttributionSource =
-  "event_path" | "cwd_event" | "input_cwd" | "workspace_root" | "last_seen" | "session_origin" | "env" | "test" | "unknown";
+  | "event_path"
+  | "cwd_event"
+  | "input_cwd"
+  | "workspace_root"
+  | "last_seen"
+  | "session_origin"
+  | "env"
+  | "test"
+  | "unknown";
 
 export interface ProjectAttribution {
   projectDir: string;

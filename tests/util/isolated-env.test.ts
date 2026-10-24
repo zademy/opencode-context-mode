@@ -21,7 +21,7 @@
 
 import "../setup-home.js";
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { homedir, tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 

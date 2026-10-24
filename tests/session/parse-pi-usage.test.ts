@@ -12,7 +12,7 @@
  * algorithmic parse.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { parsePiUsage, buildAgentUsageEvent } from "../../src/session/extract.js";
 
 /** Minimal Pi turn_end payload fixture (shape per shared-events.ts:204-209). */

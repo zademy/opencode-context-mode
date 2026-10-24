@@ -34,7 +34,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vite-plus/test";
 
 import { DEFAULT_COMMAND_ECHO_MAX, runBatchCommands, type BatchCommand } from "../../src/server.js";
 

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, test } from "vitest";
+import { afterAll, describe, test } from "vite-plus/test";
 import { extractEvents, extractUserEvents, resetErrorResolutionState, resetIterationLoopState } from "../../src/session/extract.js";
 import { SessionDB } from "../../src/session/db.js";
 import { buildResumeSnapshot } from "../../src/session/snapshot.js";

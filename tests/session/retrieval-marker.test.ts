@@ -17,7 +17,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { appendRetrievalBytes, consumeRetrievalBytes, retrievalMarkerPath } from "../../src/session/retrieval-marker.js";
 
 const dirs: string[] = [];

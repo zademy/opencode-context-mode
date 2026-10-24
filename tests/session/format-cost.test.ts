@@ -32,7 +32,7 @@
  * already defined in analytics.ts.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { renderCostExample } from "../../src/session/analytics-render.js";
 
 describe("renderCostExample", () => {
