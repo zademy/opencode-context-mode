@@ -326,7 +326,8 @@ export class AnalyticsEngine {
   queryAll(runtimeStats: RuntimeStats): FullReport {
     // ── Resolve latest session ID ──
     const latestSession = this.db.prepare("SELECT session_id FROM session_meta ORDER BY started_at DESC LIMIT 1").get() as
-      { session_id: string } | undefined;
+      | { session_id: string }
+      | undefined;
     const sid = latestSession?.session_id ?? "";
 
     // ── Runtime savings ──
@@ -382,7 +383,8 @@ export class AnalyticsEngine {
       .all(sid) as Array<{ category: string; cnt: number }>;
 
     const meta = this.db.prepare("SELECT compact_count FROM session_meta WHERE session_id = ?").get(sid) as
-      { compact_count: number } | undefined;
+      | { compact_count: number }
+      | undefined;
     const compactCount = meta?.compact_count ?? 0;
 
     const resume = this.db
@@ -614,7 +616,8 @@ function tallySidecar(sdb: DatabaseAdapter & { close(): void }, tally: LifetimeT
   // /compact feature.
   try {
     const snap = sdb.prepare("SELECT COALESCE(SUM(length(snapshot)), 0) AS bytes FROM session_resume WHERE consumed = 1").get() as
-      { bytes: number } | undefined;
+      | { bytes: number }
+      | undefined;
     if (snap?.bytes) tally.rescueBytes += snap.bytes;
   } catch {
     /* old schema */
@@ -1209,7 +1212,8 @@ function foldRealBytesDb(sdb: DatabaseAdapter & { close(): void }, scope: RealBy
 
   try {
     const tc = sdb.prepare(`SELECT COALESCE(SUM(bytes_returned), 0) AS bytes FROM tool_calls${scope.tools}`).get(...scope.params) as
-      { bytes: number } | undefined;
+      | { bytes: number }
+      | undefined;
     if (tc?.bytes) tally.bytesReturned += Number(tc.bytes);
   } catch {
     /* old schema: no tool_calls table */
@@ -1516,7 +1520,8 @@ function scanOneAdapter(
       const sdb = new DatabaseCtor(dbPath, { readonly: true });
       try {
         const ev = sdb.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM session_events").get() as
-          { cnt: number; bytes: number } | undefined;
+          | { cnt: number; bytes: number }
+          | undefined;
         if (ev) {
           result.eventCount += Number(ev.cnt ?? 0);
           result.dataBytes += Number(ev.bytes ?? 0);
@@ -1529,14 +1534,16 @@ function scanOneAdapter(
         }
         try {
           const snap = sdb.prepare("SELECT COALESCE(SUM(length(snapshot)), 0) AS bytes FROM session_resume WHERE consumed = 1").get() as
-            { bytes: number } | undefined;
+            | { bytes: number }
+            | undefined;
           if (snap?.bytes) result.rescueBytes += Number(snap.bytes);
         } catch {
           /* old schema */
         }
         try {
           const range = sdb.prepare("SELECT MIN(created_at) AS mn, MAX(created_at) AS mx FROM session_events").get() as
-            { mn: string | null; mx: string | null } | undefined;
+            | { mn: string | null; mx: string | null }
+            | undefined;
           if (range?.mn) {
             const t = Date.parse(range.mn + (range.mn.endsWith("Z") ? "" : "Z"));
             if (Number.isFinite(t) && t < result.firstMs) result.firstMs = t;

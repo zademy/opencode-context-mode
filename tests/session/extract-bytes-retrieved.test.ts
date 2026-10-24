@@ -13,7 +13,7 @@
  * char-algorithmically, never by regex.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function mcpEventsOf(toolName: string, toolResponse: string) {

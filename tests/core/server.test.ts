@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "vite-plus/test";
 
 import { PLATFORM_ENV_VARS } from "../../src/platforms/detect.js";
 import { classifyNonZeroExit } from "../../src/exit-classify.js";
@@ -4240,7 +4240,7 @@ describe("buildFetchCode — embedded SSRF guard contract", () => {
     expect(classifyIpDeclMatch, "embedded classifyIp declaration block must be extractable from buildFetchCode output").not.toBeNull();
     const classifierBlock = classifyIpDeclMatch![0];
 
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    // oxlint-disable-next-line @typescript-eslint/no-implied-eval
     const probe = new Function(`
       ${classifierBlock}
       return {
@@ -4434,7 +4434,7 @@ function collectRpcResponses(proc: ChildProcess, timeoutMs: number, expectedIds:
     const expected = new Set(expectedIds);
     const seen = new Map<number, DoctorJsonRpcResponse>();
     let buffer = "";
-    // eslint-disable-next-line prefer-const -- re-armed on every stdout chunk
+    // oxlint-disable-next-line prefer-const -- re-armed on every stdout chunk
     let timer: ReturnType<typeof setTimeout>;
 
     const finish = () => {
@@ -4680,7 +4680,7 @@ describe("open_ctx_fetch_and_index cache key includes URL (Fix 6/10)", () => {
 //   - structured results surface failure to callers
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { vi } from "vitest";
+import { vi } from "vite-plus/test";
 import { browserOpenArgv, openBrowserSync, killProcessOnPort, type SpawnSyncFn } from "../../src/server.js";
 
 type Captured = { cmd: string; args: readonly string[]; opts: unknown };

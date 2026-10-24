@@ -12,7 +12,7 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 
 const cleanups: Array<() => void> = [];

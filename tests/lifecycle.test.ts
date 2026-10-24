@@ -5,7 +5,7 @@
  * and triggers shutdown. Uses injectable check function for testability.
  */
 
-import { describe, test, assert } from "vitest";
+import { describe, test, assert } from "vite-plus/test";
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

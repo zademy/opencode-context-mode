@@ -543,7 +543,8 @@ export function resolveSessionIdFromSessionDB(opts?: {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       const row = db.prepare("SELECT session_id FROM session_events ORDER BY created_at DESC LIMIT 1").get() as
-        { session_id?: string } | undefined;
+        | { session_id?: string }
+        | undefined;
       const sid = row?.session_id;
       if (sid) __cachedSessionId = { sid, checkedAt: now };
       return sid;
@@ -4319,7 +4320,8 @@ async function resolveConversationKit(
           const db = new Database((await import("node:path")).join(getSessionDir(), file), { readonly: true });
           try {
             const r = db.prepare("SELECT project_dir FROM session_meta WHERE session_id = ?").get(sid) as
-              { project_dir: string } | undefined;
+              | { project_dir: string }
+              | undefined;
             if (r?.project_dir) {
               projectDirForSid = r.project_dir;
               break;
@@ -5116,7 +5118,7 @@ async function main() {
   const mcpSentinelBody = `${process.pid}\n${process.env.OPEN_CONTEXT_MODE_HOST_PID || process.ppid}`;
   delete process.env.OPEN_CONTEXT_MODE_HOST_PID;
   // #844: handle to the periodic sentinel refresh timer (started after connect).
-  // eslint-disable-next-line prefer-const -- assigned after connect(); `const` would TDZ-crash the shutdown closure if a signal lands mid-handshake
+  // oxlint-disable-next-line prefer-const -- assigned after connect(); `const` would TDZ-crash the shutdown closure if a signal lands mid-handshake
   let sentinelRefresh: ReturnType<typeof setInterval> | undefined;
 
   // Clean up own DB + backgrounded processes + preload script on shutdown

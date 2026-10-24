@@ -10,7 +10,7 @@
  * got dropped is still announced.
  */
 import { strict as assert } from "node:assert";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { buildResumeSnapshot, type StoredEvent } from "../../src/session/snapshot.js";
 
 function makeEvent(o: Partial<StoredEvent> & Pick<StoredEvent, "type" | "category" | "data">): StoredEvent {

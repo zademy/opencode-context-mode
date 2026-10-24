@@ -1381,7 +1381,8 @@ export class SessionDB {
    */
   getEventBytesSummary(sessionId: string): { bytesAvoided: number; bytesReturned: number } {
     const row = this.stmt(S.getEventBytesSummary).get(sessionId) as
-      { bytes_avoided: number | null; bytes_returned: number | null } | undefined;
+      | { bytes_avoided: number | null; bytes_returned: number | null }
+      | undefined;
     return {
       bytesAvoided: Number(row?.bytes_avoided ?? 0),
       bytesReturned: Number(row?.bytes_returned ?? 0),
@@ -1404,7 +1405,8 @@ export class SessionDB {
   _getSessionProjectDir(sessionId: string): string {
     try {
       const row = this.db.prepare("SELECT project_dir FROM session_meta WHERE session_id = ?").get(sessionId) as
-        { project_dir: string } | undefined;
+        | { project_dir: string }
+        | undefined;
       return row?.project_dir || "";
     } catch {
       return "";
@@ -1639,7 +1641,8 @@ export class SessionDB {
   getLatestSessionId(): string | null {
     try {
       const row = this.db.prepare("SELECT session_id FROM session_meta ORDER BY started_at DESC LIMIT 1").get() as
-        { session_id?: string } | undefined;
+        | { session_id?: string }
+        | undefined;
       return row?.session_id ?? null;
     } catch {
       return null;

@@ -26,7 +26,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 import {
   enumerateAdapterDirs,

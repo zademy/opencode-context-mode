@@ -15,7 +15,7 @@
  *    "rename" (SessionDB's default) quarantines the files as
  *    `<path>.corrupt-<ts>`; "delete" (ContentStore) unlinks them outright.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

@@ -18,7 +18,7 @@
  *   (g) native-cost passthrough wins over computed
  */
 
-import { describe, test, expect, vi } from "vitest";
+import { describe, test, expect, vi } from "vite-plus/test";
 import { lookupPrice, computeCostUsd, nativeOrComputed } from "../../src/session/pricing.js";
 
 describe("session/pricing — lookupPrice", () => {

@@ -1,5 +1,5 @@
 import "../setup-home";
-import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect } from "vite-plus/test";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { BaseAdapter } from "../../src/platforms/base.js";

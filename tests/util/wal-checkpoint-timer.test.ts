@@ -6,7 +6,7 @@
  * Must: fire PASSIVE (never TRUNCATE/EXCLUSIVE — ADR 0001), stop on request,
  * disable on non-positive/non-finite intervals, and swallow pragma errors.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vite-plus/test";
 import { startWalCheckpointTimer } from "../../src/db-base.js";
 
 describe("startWalCheckpointTimer (#985)", () => {

@@ -15,7 +15,7 @@
  * to this file. This is the structural test for MUST-3 (17 adapters equal).
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { resolveProjectDir } from "../../src/util/project-dir.js";
 import { PLATFORM_ENV_VARS, workspaceEnvVarsFor, foreignWorkspaceEnv, foreignIdentificationEnv } from "../../src/platforms/detect.js";
 import type { PlatformId } from "../../src/platforms/types.js";

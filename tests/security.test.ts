@@ -5,7 +5,7 @@
  * chained command splitting, shell-escape scanning, and file path evaluation.
  */
 
-import { describe, test, beforeAll, afterAll } from "vitest";
+import { describe, test, beforeAll, afterAll } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";

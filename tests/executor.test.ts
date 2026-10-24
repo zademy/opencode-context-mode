@@ -1,4 +1,4 @@
-import { describe, test, expect, afterAll, afterEach, vi } from "vitest";
+import { describe, test, expect, afterAll, afterEach, vi } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { existsSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, dirname, basename, isAbsolute } from "node:path";

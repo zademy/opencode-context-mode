@@ -14,7 +14,7 @@
  * function does — a shape this repo has had trouble with before.
  */
 
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect, afterEach } from "vite-plus/test";
 import { mkdtempSync, rmSync, existsSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

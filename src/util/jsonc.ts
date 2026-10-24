@@ -6,7 +6,7 @@
  * platform config we did not write ourselves.
  */
 
-// eslint-disable-next-line no-irregular-whitespace -- ZWSP keeps the literal `*/` from closing this docstring
+// oxlint-disable-next-line no-irregular-whitespace -- ZWSP keeps the literal `*/` from closing this docstring
 /** Strip `//` line + `/* *​/` block comments and trailing commas, string-aware. */
 export function stripJsonComments(str: string): string {
   let out = "";

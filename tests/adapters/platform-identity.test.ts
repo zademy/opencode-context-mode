@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import { PLATFORM_ENV_VAR_TABLE, PLATFORM_TOOL_ALIASES } from "../../src/platform-identity.js";
 import { PLATFORM_ENV_VARS } from "../../src/platforms/detect.js";

@@ -6,7 +6,7 @@
  * truncateJSON, and capBytes remain intact.
  */
 
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

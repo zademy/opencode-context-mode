@@ -11,7 +11,7 @@ import { strict as assert } from "node:assert";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, test } from "vitest";
+import { afterAll, describe, test } from "vite-plus/test";
 import Database from "better-sqlite3";
 import { SessionDB } from "../../src/session/db.js";
 
@@ -151,7 +151,8 @@ describe("SessionDB bytes columns (D2 PRD Phase 1)", () => {
     const reader = new Database(dbPath, { readonly: true });
     try {
       const row = reader.prepare(`SELECT bytes_avoided, bytes_returned FROM session_events WHERE session_id = ?`).get("legacy-sess") as
-        { bytes_avoided: number; bytes_returned: number } | undefined;
+        | { bytes_avoided: number; bytes_returned: number }
+        | undefined;
       assert.ok(row, "legacy row must still be readable");
       assert.equal(row!.bytes_avoided, 0);
       assert.equal(row!.bytes_returned, 0);

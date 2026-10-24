@@ -16,7 +16,7 @@
  * never surface in the UI.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractUserPromptFeatures } from "../../src/session/extract.js";
 
 describe("extractUserPromptFeatures — §11 Layer 1 (10 features)", () => {

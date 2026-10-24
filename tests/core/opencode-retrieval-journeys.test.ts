@@ -20,7 +20,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
 const repoRoot = resolve(__dirname, "..", "..");
 const mcpEntry = resolve(repoRoot, "server.bundle.mjs");
@@ -383,7 +383,7 @@ describe("#4 — a test-output diagnosis is complete or it is not a diagnosis", 
 afterAll(() => {
   if (process.env.CM_PRINT_MEASUREMENTS) {
     for (const m of measurements) {
-      // eslint-disable-next-line no-console
+      // oxlint-disable-next-line no-console
       console.log(`MEASUREMENT ${m.journey} [${m.mode}] returned bytes: ${m.runs.join(", ")}`);
     }
   }

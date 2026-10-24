@@ -10,7 +10,7 @@
  * These tests exercise routePreToolUse() directly via a subprocess so the
  * module-level securityInitFailed flag can be controlled deterministically.
  */
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";

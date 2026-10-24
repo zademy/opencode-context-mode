@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { evaluateFilePath } from "../../src/security.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

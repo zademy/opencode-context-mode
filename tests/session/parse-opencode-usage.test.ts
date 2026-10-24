@@ -20,7 +20,7 @@
  * parse.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { parseOpencodeUsage, buildAgentUsageEvent } from "../../src/session/extract.js";
 
 /** Minimal opencode `message.updated` bus-event fixture. */

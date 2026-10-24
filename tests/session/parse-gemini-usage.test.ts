@@ -22,7 +22,7 @@
  * NO regex. Pure, null-safe, algorithmic.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { parseGeminiUsage } from "../../src/session/extract.js";
 
 describe("parseGeminiUsage — gemini-cli AfterModel usageMetadata", () => {

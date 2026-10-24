@@ -49,22 +49,22 @@
     "bundle": "esbuild src/server.ts --bundle --platform=node --target=node18 --format=esm --outfile=server.bundle.mjs --external:better-sqlite3 --external:turndown --external:turndown-plugin-gfm --external:@mixmark-io/domino --minify && esbuild src/cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=cli.bundle.mjs --external:better-sqlite3 --minify && esbuild src/security.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/security.bundle.mjs --minify && esbuild src/platform-identity.ts --bundle --platform=node --target=node18 --format=esm --outfile=hooks/platform-identity.bundle.mjs --minify",
     "version": "git add package.json",
     "prepublishOnly": "npm run build",
-    "dev": "npx tsx src/server.ts",
-    "doctor": "npx tsx src/cli.ts doctor",
+    "dev": "vpx src/server.ts",
+    "doctor": "vpx src/cli.ts doctor",
     "fallow": "fallow",
     "tailwind": "node scripts/build-dashboard-css.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "lint": "vp lint .",
+    "lint:fix": "vp lint . --fix",
+    "format": "vp fmt .",
+    "format:check": "vp fmt --check .",
     "pretest": "npm run build",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "benchmark": "npx tsx tests/benchmark.ts",
-    "test:use-cases": "npx tsx tests/use-cases.ts",
-    "test:compare": "npx tsx tests/context-comparison.ts",
-    "test:ecosystem": "npx tsx tests/ecosystem-benchmark.ts",
+    "test": "vp test run",
+    "test:watch": "vp test",
+    "benchmark": "vpx tests/benchmark.ts",
+    "test:use-cases": "vpx tests/use-cases.ts",
+    "test:compare": "vpx tests/context-comparison.ts",
+    "test:ecosystem": "vpx tests/ecosystem-benchmark.ts",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
@@ -78,31 +78,19 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
     "@opencode/plugin": "^2.0.32",
     "@tailwindcss/cli": "^4.3.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.11",
     "@types/turndown": "^5.0.6",
     "esbuild": "^0.28.2",
-    "eslint": "^10.13.0",
-    "eslint-config-prettier": "^10.1.8",
     "fallow": "^3.33.1",
     "globals": "^17.13.0",
-    "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.71.2",
-    "vite-plus": "^1.4.0",
-    "vitest": "^5.0.5"
+    "vite-plus": "catalog:"
   },
   "packageManager": "pnpm@10.23.0+sha512.21c4e5698002ade97e4efe8b8b4a89a8de3c85a37919f957e7a0f30f38fbc5bbdd05980ffe29179b2fb6e6e691242e098d945d1601772cad0fef5fb6411e2a4b",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild"
-    ]
-  },
   "engines": {
     "node": ">=22.5.0"
   }

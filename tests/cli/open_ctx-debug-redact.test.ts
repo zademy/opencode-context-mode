@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { REDACTED, isSecretKey, redactConfigContent, redactText } from "../../scripts/lib/open_ctx-debug-redact.mjs";
 
 // scripts/open_ctx-debug.sh copies config files into a report the bug template

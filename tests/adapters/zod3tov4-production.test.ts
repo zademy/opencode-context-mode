@@ -12,7 +12,7 @@
  * This test runs against the actual build/ output, verifying the fix
  * works in the compiled JavaScript that OpenCode will load.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { z } from "zod";
 import z4 from "zod/v4";
 import { fileURLToPath } from "node:url";

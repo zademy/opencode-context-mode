@@ -6,7 +6,7 @@
  *   - cli-hook-path.test.ts (forward-slash hook paths)
  *   - package-exports.test.ts (public API surface)
  */
-import { describe, it, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, test, expect, beforeEach, afterEach } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import {
   readFileSync,

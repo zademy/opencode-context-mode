@@ -1,5 +1,5 @@
 import "../setup-home";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { z } from "zod";
 import { zod3ShapeToV4 } from "../../src/platforms/opencode/zod3tov4.js";
 

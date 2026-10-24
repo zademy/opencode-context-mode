@@ -19,7 +19,7 @@
  * forward-compatible Zod envelope accepts them today (no migration).
  */
 
-import { describe, test, expect, vi } from "vitest";
+import { describe, test, expect, vi } from "vite-plus/test";
 import { extractEvents } from "../../src/session/extract.js";
 
 function agentUsageOf(toolResponse: unknown, toolName: string = "Task") {

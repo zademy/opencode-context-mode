@@ -12,7 +12,7 @@
  * regardless of the arithmetic.
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 
 import { computeSavings } from "../../src/server.js";
 

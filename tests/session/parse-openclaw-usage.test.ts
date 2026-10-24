@@ -28,7 +28,7 @@
  * NO regex. Pure, null-safe, algorithmic.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { parseOpenclawUsage, buildAgentUsageEvent } from "../../src/session/extract.js";
 
 describe("parseOpenclawUsage — openclaw model.usage diagnostic event", () => {

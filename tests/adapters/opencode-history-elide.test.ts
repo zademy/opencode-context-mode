@@ -8,7 +8,7 @@
  * the transcript is byte-identical afterwards.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import {
   applyElision,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { BunSQLiteAdapter } from "../src/db-base.js";
 
 /**

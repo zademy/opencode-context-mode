@@ -12,7 +12,7 @@
  * 8. Version and update info in footer
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { formatReport } from "../../src/session/analytics-render.js";
 import type { FullReport } from "../../src/session/analytics-query.js";
 

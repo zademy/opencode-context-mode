@@ -1,5 +1,5 @@
 import "../setup-home";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 

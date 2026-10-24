@@ -11,7 +11,7 @@
  *   7. Extract Snippet (positionsFromHighlight, extractSnippet, store integration)
  */
 
-import { describe, test, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, it, beforeEach, afterEach } from "vite-plus/test";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

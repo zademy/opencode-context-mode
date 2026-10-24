@@ -14,7 +14,7 @@
  * require an upstream Claude Code SDK change. This file does not cover it.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 import { extractUserEvents } from "../../src/session/extract.js";
 
 function planEventsOf(message: string) {

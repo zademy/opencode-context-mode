@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { buildResumeSnapshot, renderTaskState, type StoredEvent } from "../../src/session/snapshot.js";
 
 // ── Helpers ──

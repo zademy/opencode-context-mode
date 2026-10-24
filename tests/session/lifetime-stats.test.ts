@@ -16,7 +16,7 @@ import { mkdirSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { SessionDB } from "../../src/session/db.js";
 import { getLifetimeStats } from "../../src/session/analytics-query.js";
 import { readLifetimeTokenSnapshot, writeLifetimeTokenSnapshot } from "../../src/session/lifetime-snapshot.js";

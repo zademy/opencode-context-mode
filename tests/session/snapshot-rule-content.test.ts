@@ -10,7 +10,7 @@
  * (which feed queryTerms) survive.
  */
 import { strict as assert } from "node:assert";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { buildResumeSnapshot, type StoredEvent } from "../../src/session/snapshot.js";
 
 const MARKER = "NEVER-INLINE-THIS-RULE-BODY";

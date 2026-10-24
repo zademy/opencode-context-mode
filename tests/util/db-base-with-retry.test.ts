@@ -11,7 +11,7 @@
  * would pass either way.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "vite-plus/test";
 
 import { withRetry } from "../../src/db-base.js";
 

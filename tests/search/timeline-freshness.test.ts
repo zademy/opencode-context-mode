@@ -24,7 +24,7 @@
  * contract of timeline mode, pinned by tests/core/search.test.ts ("timeline
  * results are sorted chronologically").
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { searchAllSources } from "../../src/search/unified.js";
 
 const NOW = Date.parse("2026-03-01T12:00:00.000Z");

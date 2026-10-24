@@ -10,7 +10,7 @@
  * artefacts (no fabricated 1-byte baseline, no 498528× multiple).
  */
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { compressionRatio, pricePerToken } from "../../src/session/analytics-metrics.js";
 
 describe("compressionRatio — ADR-0004 strict compression", () => {

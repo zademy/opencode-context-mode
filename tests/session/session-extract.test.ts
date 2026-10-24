@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, test } from "vitest";
+import { describe, test } from "vite-plus/test";
 import { extractEvents, extractUserEvents, resetErrorResolutionState, resetIterationLoopState } from "../../src/session/extract.js";
 
 // ════════════════════════════════════════════
