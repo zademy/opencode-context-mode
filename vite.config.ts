@@ -161,6 +161,7 @@ export default defineConfig({
     quoteProps: "preserve",
     sortPackageJson: false,
     ignorePatterns: [
+      "src/dashboard/styles.ts",
       "node_modules",
       "build",
       ".codegraph",
