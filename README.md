@@ -390,7 +390,7 @@ bash scripts/open_ctx-debug.sh    # full diagnostic report for bug reports
 
 The debug script collects OS info, runtime versions, better-sqlite3 status, adapter detection, config files (redacted), hook validation, FTS5/SQLite test, executor test, process check, session databases, and environment variables into a single pasteable markdown report.
 
-Works on every client. The `open_ctx-*` skills under [`skills/`](https://github.com/zademy/opencode-context-mode/tree/main/skills) expose the same tools to clients that render slash commands.
+Works on every client. The `open-ctx-*` skills under [`skills/`](https://github.com/zademy/opencode-context-mode/tree/main/skills) expose the same tools to clients that render slash commands.
 
 ## Benchmarks
 
@@ -411,38 +411,38 @@ Over a full session: 315 KB of raw output becomes 5.4 KB. Session time extends f
 
 ## Try It
 
-These prompts work out of the box. Run `/open-context-mode:open_ctx-stats` after each to see the savings.
+These prompts work out of the box. Run `/open-context-mode:open-ctx-stats` after each to see the savings.
 
 **Deep repo research** — 5 calls, 62 KB context (raw: 986 KB, 94% saved)
 ```
 Research https://github.com/modelcontextprotocol/servers — architecture, tech stack,
-top contributors, open issues, and recent activity. Then run /open-context-mode:open_ctx-stats.
+top contributors, open issues, and recent activity. Then run /open-context-mode:open-ctx-stats.
 ```
 
 **Git history analysis** — 1 call, 5.6 KB context
 ```
 Clone https://github.com/facebook/react and analyze the last 500 commits:
 top contributors, commit frequency by month, and most changed files.
-Then run /open-context-mode:open_ctx-stats.
+Then run /open-context-mode:open-ctx-stats.
 ```
 
 **Web scraping** — 1 call, 3.2 KB context
 ```
 Fetch the Hacker News front page, extract all posts with titles, scores,
-and domains. Group by domain. Then run /open-context-mode:open_ctx-stats.
+and domains. Group by domain. Then run /open-context-mode:open-ctx-stats.
 ```
 
 **Large JSON API** — 7.5 MB raw → 0.9 KB context (99% saved)
 ```
 Create a local server that returns a 7.5 MB JSON with 20,000 records and a secret
 hidden at index 13000. Fetch the endpoint, find the hidden record, and show me
-exactly what's in it. Then run /open-context-mode:open_ctx-stats.
+exactly what's in it. Then run /open-context-mode:open-ctx-stats.
 ```
 
 **Documentation search** — 2 calls, 1.8 KB context
 ```
 Fetch the React useEffect docs, index them, and find the cleanup pattern
-with code examples. Then run /open-context-mode:open_ctx-stats.
+with code examples. Then run /open-context-mode:open-ctx-stats.
 ```
 
 **Session continuity** — compaction recovery with full state

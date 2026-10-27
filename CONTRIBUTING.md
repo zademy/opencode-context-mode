@@ -370,9 +370,9 @@ Required information:
 
 | Task | Command |
 |---|---|
-| Check version | `/open-context-mode:open_ctx-doctor` |
-| View session stats | `/open-context-mode:open_ctx-stats` |
-| Purge knowledge base | `/open-context-mode:open_ctx-purge` |
+| Check version | `/open-context-mode:open-ctx-doctor` |
+| View session stats | `/open-context-mode:open-ctx-stats` |
+| Purge knowledge base | `/open-context-mode:open-ctx-purge` |
 | Run diagnostics | `bash scripts/open_ctx-debug.sh` |
 | See background steps | `Ctrl+O` |
 | Kill cached server | `pkill -f "open-context-mode.*start.mjs"` |

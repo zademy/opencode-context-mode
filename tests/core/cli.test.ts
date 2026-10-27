@@ -446,8 +446,8 @@ describe("Bin entry uses cli.bundle.mjs", () => {
 // ── SKILL.md MCP-first pattern ────────────────────────────────────────
 
 describe("SKILL.md prefers MCP tool over Bash", () => {
-  it("open_ctx-doctor SKILL.md prefers MCP tool over Bash", () => {
-    const skill = readFileSync(resolve(ROOT, "skills", "open_ctx-doctor", "SKILL.md"), "utf-8");
+  it("open-ctx-doctor SKILL.md prefers MCP tool over Bash", () => {
+    const skill = readFileSync(resolve(ROOT, "skills", "open-ctx-doctor", "SKILL.md"), "utf-8");
     // Must mention the MCP tool
     expect(skill).toContain("open_ctx_doctor");
     expect(skill).toContain("MCP tool");

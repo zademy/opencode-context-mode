@@ -1,7 +1,7 @@
 ---
-name: open_ctx-search
+name: open-ctx-search
 description: Recall indexed content or past sessions instead of re-reading sources.
-  Trigger: /open-context-mode:open_ctx-search
+  Trigger: /open-context-mode:open-ctx-search
 user-invocable: true
 ---
 

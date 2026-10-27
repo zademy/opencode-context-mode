@@ -1,7 +1,7 @@
 ---
-name: open_ctx-insight
+name: open-ctx-insight
 description: Open the Insight usage dashboard in the browser.
-  Trigger: /open-context-mode:open_ctx-insight
+  Trigger: /open-context-mode:open-ctx-insight
 user-invocable: true
 ---
 

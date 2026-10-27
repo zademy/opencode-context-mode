@@ -1,7 +1,7 @@
 ---
-name: open_ctx-stats
+name: open-ctx-stats
 description: Show what the sandbox saved this session.
-  Trigger: /open-context-mode:open_ctx-stats
+  Trigger: /open-context-mode:open-ctx-stats
 user-invocable: true
 ---
 
@@ -19,5 +19,5 @@ Report the current session's context savings.
    "No open-context-mode calls this session."
 
 `open_ctx_stats` is read-only. To delete indexed content, use
-`open_ctx_purge(confirm: true)` via `/open-context-mode:open_ctx-purge`.
+`open_ctx_purge(confirm: true)` via `/open-context-mode:open-ctx-purge`.
 

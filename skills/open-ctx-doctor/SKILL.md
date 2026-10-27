@@ -1,7 +1,7 @@
 ---
-name: open_ctx-doctor
+name: open-ctx-doctor
 description: Diagnose an open-context-mode install — runtimes, hooks, FTS5, npm version.
-  Trigger: /open-context-mode:open_ctx-doctor
+  Trigger: /open-context-mode:open-ctx-doctor
 user-invocable: true
 ---
 
@@ -14,7 +14,7 @@ user-invocable: true
 2. Reproduce it verbatim. The status prefixes are already renderer-safe across clients:
    `[OK]` PASS, `[FAIL]` FAIL, `[WARN]` WARN.
 3. **Fallback**, only when the MCP tool call fails: resolve the plugin root by dropping
-   `/skills/open_ctx-doctor` from this skill's directory, then run
+   `/skills/open-ctx-doctor` from this skill's directory, then run
    ```bash
    CLI="<PLUGIN_ROOT>/cli.bundle.mjs"; [ ! -f "$CLI" ] && CLI="<PLUGIN_ROOT>/build/cli.js"
    node "$CLI" doctor

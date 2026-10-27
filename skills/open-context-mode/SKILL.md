@@ -53,8 +53,8 @@ tests or inspects — goes through the sandbox.
 | What open-context-mode itself saved; is it installed right | `open_ctx_stats` · `open_ctx_doctor` |
 | Usage dashboard; delete indexed content | `open_ctx_insight` · `open_ctx_purge(confirm: true)` |
 
-Per-tool detail: `/open-context-mode:open_ctx-search`, `:open_ctx-index`,
-`:open_ctx-stats`, `:open_ctx-doctor`, `:open_ctx-insight`, `:open_ctx-purge`.
+Per-tool detail: `/open-context-mode:open-ctx-search`, `:open-ctx-index`,
+`:open-ctx-stats`, `:open-ctx-doctor`, `:open-ctx-insight`, `:open-ctx-purge`.
 
 ## Two levers that decide whether output lands or floods
 

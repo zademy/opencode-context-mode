@@ -80,13 +80,13 @@ ${
   includeCommands
     ? `
   <open_ctx_commands>
-    "open-context-mode stats" | "open_ctx-stats" | "/open_ctx-stats" | context savings question
+    "open-context-mode stats" | "open-ctx-stats" | "/open-ctx-stats" | context savings question
     → Call stats MCP tool, display full output verbatim.
 
-    "open-context-mode doctor" | "open_ctx-doctor" | "/open_ctx-doctor" | diagnose open-context-mode
+    "open-context-mode doctor" | "open-ctx-doctor" | "/open-ctx-doctor" | diagnose open-context-mode
     → Call doctor MCP tool, run returned shell command, display as checklist.
 
-    "open-context-mode purge" | "open_ctx-purge" | "/open_ctx-purge" | wipe/reset knowledge base
+    "open-context-mode purge" | "open-ctx-purge" | "/open-ctx-purge" | wipe/reset knowledge base
     → Call purge MCP tool with confirm: true. Warn: irreversible.
 
     After /clear or /compact: knowledge base preserved. Tell user: "open-context-mode knowledge base preserved. Use \`open-context-mode purge\` to start fresh."
