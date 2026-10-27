@@ -392,6 +392,14 @@ The debug script collects OS info, runtime versions, better-sqlite3 status, adap
 
 Works on every client. The `open-ctx-*` skills under [`skills/`](https://github.com/zademy/opencode-context-mode/tree/main/skills) expose the same tools to clients that render slash commands.
 
+Install all of them with the [skills CLI](https://github.com/vercel-labs/skills) — project-level by default (OpenCode discovers `.agents/skills/` automatically):
+
+```bash
+npx skills@latest add zademy/opencode-context-mode -a opencode -s '*' -y
+```
+
+Add `-g` to install globally (`~/.agents/skills/`) instead of per-project, or use `--all` in place of `-a opencode -s '*'` to target every supported agent. OpenCode plugin users get the skills bundled and namespaced already (`/open-context-mode:open-ctx-stats`) — the CLI is for installs without the plugin.
+
 ## Benchmarks
 
 | Scenario | Raw | Context | Saved |
