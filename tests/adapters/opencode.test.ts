@@ -91,6 +91,79 @@ describe("OpenCodeAdapter", () => {
         rmSync(root, { recursive: true, force: true });
       });
 
+      it("readSettings tolerates V2-written opencode.json with trailing commas", () => {
+        const root = mkdtempSync(join(tmpdir(), "opencode-adapter-"));
+        const dir = join(root, "project");
+        const home = join(root, "home");
+        const conf = join(home, ".config", "opencode");
+        const file = join(conf, "opencode.json");
+        const src = resolve(process.cwd(), "src", "platforms", "opencode", "index.ts");
+        const tsx = resolve(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+        mkdirSync(dir, { recursive: true });
+        mkdirSync(conf, { recursive: true });
+        // Exact shape OpenCode V2 writes: plural `plugins` array with npm
+        // specifiers AND trailing commas (its loader is JSONC-tolerant, strict
+        // JSON.parse is not) — regression for the doctor "Could not read
+        // opencode.json" failure on every v2 install.
+        writeFileSync(
+          file,
+          '{\n  "$schema": "https://opencode.ai/config.json",\n  "plugins": [\n    "open-context-mode@latest",\n    "hashline-opencode-plugin",\n  ],\n}\n',
+        );
+
+        const run = spawnSync(
+          process.execPath,
+          [
+            tsx,
+            "-e",
+            `import { OpenCodeAdapter } from ${JSON.stringify(src)};const a=new OpenCodeAdapter();const s=a.readSettings();console.log(JSON.stringify({read:!!s,plugins:s?.plugins}))`,
+          ],
+          { cwd: dir, env: env(home), encoding: "utf-8" },
+        );
+
+        expect(run.status).toBe(0);
+        expect(JSON.parse(run.stdout)).toEqual({
+          read: true,
+          plugins: ["open-context-mode@latest", "hashline-opencode-plugin"],
+        });
+
+        rmSync(root, { recursive: true, force: true });
+      });
+
+      it("doctor recognizes V2 `plugins` (plural) registration without plugins/ discovery", () => {
+        const root = mkdtempSync(join(tmpdir(), "opencode-adapter-"));
+        const dir = join(root, "project");
+        const home = join(root, "home");
+        const conf = join(home, ".config", "opencode");
+        const file = join(conf, "opencode.json");
+        const src = resolve(process.cwd(), "src", "platforms", "opencode", "index.ts");
+        const tsx = resolve(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+        mkdirSync(dir, { recursive: true });
+        mkdirSync(conf, { recursive: true });
+        // V2 npm-specifier install: `plugins` key, no plugins/ discovery dir.
+        // v3.3.0 checked only `plugin` (singular) and reported a false
+        // "No plugin array found" / "not registered" fail for this shape.
+        writeFileSync(file, '{\n  "plugins": ["open-context-mode@latest"],\n}\n');
+
+        const run = spawnSync(
+          process.execPath,
+          [
+            tsx,
+            "-e",
+            `import { OpenCodeAdapter } from ${JSON.stringify(src)};const a=new OpenCodeAdapter();console.log(JSON.stringify({hooks:a.validateHooks('/tmp/p'),reg:a.checkPluginRegistration()}))`,
+          ],
+          { cwd: dir, env: env(home), encoding: "utf-8" },
+        );
+
+        expect(run.status).toBe(0);
+        const out = JSON.parse(run.stdout);
+        expect(out.hooks.find((d: { check: string }) => d.check === "Plugin configuration")).toBeUndefined();
+        const registration = out.hooks.find((d: { check: string }) => d.check === "Plugin registration");
+        expect(registration.status).toBe("pass");
+        expect(out.reg.status).toBe("pass");
+
+        rmSync(root, { recursive: true, force: true });
+      });
+
       it("configureAllHooks removes legacy open-context-mode MCP block for plugin-only mode (#574)", () => {
         const root = mkdtempSync(join(tmpdir(), "opencode-adapter-"));
         const dir = join(root, "project");

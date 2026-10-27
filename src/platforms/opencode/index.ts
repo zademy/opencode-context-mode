@@ -21,7 +21,7 @@ import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 import { BaseAdapter, resolveContextModeSessionDir } from "../base.js";
-import { stripJsonComments } from "../../util/jsonc.js";
+import { parseJsonc } from "../../util/jsonc.js";
 
 import type { HookAdapter, DiagnosticResult, HookRegistration, PlatformId } from "../types.js";
 
@@ -176,8 +176,14 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
     for (const configPath of configPaths) {
       try {
         const raw = readFileSync(configPath, "utf-8");
-        const text = configPath.endsWith(".jsonc") ? stripJsonComments(raw) : raw;
-        const settings = JSON.parse(text) as Record<string, unknown>;
+        // OpenCode V2 writes opencode.json itself (plugin installs append npm
+        // specifiers to the `plugins` array) and its loader is JSONC-tolerant,
+        // so the on-disk file can carry trailing commas that strict JSON.parse
+        // rejects — every v2 install then reads as "Could not read opencode.json"
+        // in doctor. parseJsonc tries strict JSON first, then retries with
+        // comment/trailing-comma stripping (#787).
+        const settings = parseJsonc<Record<string, unknown>>(raw);
+        if (!settings) continue;
 
         if (!firstValidSettings) {
           firstValidSettings = settings;
@@ -225,7 +231,7 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
 
     // Check for "open-context-mode" in plugin array
     const hasPlugin = this.hasContextModePlugin(settings);
-    if (Array.isArray(settings.plugin)) {
+    if (Array.isArray(settings.plugin) || Array.isArray(settings.plugins)) {
       results.push({
         check: "Plugin registration",
         status: hasPlugin ? "pass" : "fail",
@@ -285,14 +291,14 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
       return {
         check: "Plugin registration",
         status: "pass",
-        message: "open-context-mode found in plugin array",
+        message: "open-context-mode found in plugin/plugins array",
       };
     }
 
     return {
       check: "Plugin registration",
       status: "fail",
-      message: `open-context-mode not found in ${this.platform}.json plugin array`,
+      message: `open-context-mode not found in ${this.platform}.json(c) plugin/plugins array`,
       fix: "npm install (reinstall the plugin to reconfigure hooks)",
     };
   }
@@ -392,9 +398,15 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
    * Check whether a settings object has the open-context-mode plugin registered.
    */
   private hasContextModePlugin(settings: Record<string, unknown>): boolean {
-    const plugins = settings.plugin;
-    if (Array.isArray(plugins) && plugins.some((p: unknown) => typeof p === "string" && p.includes("open-context-mode"))) {
-      return true;
+    // Two config shapes exist (V2 schema accepts both, #55524): V1/KiloCode
+    // uses `plugin`, OpenCode V2 uses `plugins` with npm specifiers
+    // ("open-context-mode@latest"). Accept either key so a healthy v2
+    // npm-specifier install is not reported as "not registered".
+    for (const key of ["plugin", "plugins"] as const) {
+      const entries = settings[key];
+      if (Array.isArray(entries) && entries.some((p: unknown) => typeof p === "string" && p.includes("open-context-mode"))) {
+        return true;
+      }
     }
     // OpenCode 2.x resolves `plugin` config entries as npm specifiers only —
     // a filesystem path there is ignored without an error. Local plugins load
