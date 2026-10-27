@@ -1,6 +1,7 @@
 ---
 name: open-ctx-stats
-description: Show what the sandbox saved this session.
+description: |
+  Show what the sandbox saved this session.
   Trigger: /open-context-mode:open-ctx-stats
 user-invocable: true
 ---

@@ -1,6 +1,7 @@
 ---
 name: open-ctx-purge
-description: Delete open-context-mode data. Irreversible.
+description: |
+  Delete open-context-mode data. Irreversible.
   Trigger: /open-context-mode:open-ctx-purge
 user-invocable: true
 ---

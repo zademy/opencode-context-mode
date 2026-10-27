@@ -1,6 +1,7 @@
 ---
 name: open-ctx-doctor
-description: Diagnose an open-context-mode install — runtimes, hooks, FTS5, npm version.
+description: |
+  Diagnose an open-context-mode install — runtimes, hooks, FTS5, npm version.
   Trigger: /open-context-mode:open-ctx-doctor
 user-invocable: true
 ---

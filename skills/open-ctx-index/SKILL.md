@@ -1,6 +1,7 @@
 ---
 name: open-ctx-index
-description: Store a file or directory for later retrieval by open_ctx_search.
+description: |
+  Store a file or directory for later retrieval by open_ctx_search.
   Trigger: /open-context-mode:open-ctx-index
 user-invocable: true
 ---
