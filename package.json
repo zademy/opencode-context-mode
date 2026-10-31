@@ -71,25 +71,25 @@
     "@clack/prompts": "^1.8.1",
     "@mixmark-io/domino": "^2.2.0",
     "@modelcontextprotocol/sdk": "^1.32.0",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.0.3",
     "picocolors": "^1.1.1",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@opencode/plugin": "^2.0.32",
     "@tailwindcss/cli": "^4.3.3",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.19.11",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
     "@types/turndown": "^5.0.6",
     "esbuild": "^0.28.2",
-    "fallow": "^3.33.1",
+    "fallow": "^3.38.1",
     "tsx": "^4.23.15",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.3",
     "vite-plus": "catalog:"
   },
-  "packageManager": "pnpm@10.23.0+sha512.21c4e5698002ade97e4efe8b8b4a89a8de3c85a37919f957e7a0f30f38fbc5bbdd05980ffe29179b2fb6e6e691242e098d945d1601772cad0fef5fb6411e2a4b",
+  "packageManager": "pnpm@10.34.9",
   "engines": {
     "node": ">=22.5.0"
   }
