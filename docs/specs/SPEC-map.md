@@ -23,6 +23,7 @@ Out of scope: new product features, adoption/marketing, large rewrites.
 | `executor-resilience` | Sandbox (PolyglotExecutor): guaranteed timeouts, orphan-process cleanup, runtime failures reported without hanging the tool | — | Not started |
 | `v2-compat` | Defensive compat with OpenCode V2: drift detection (event shapes, tool names, hook registration, routing-block splice), version-aware degradation | `hook-resilience` | Not started |
 | `diagnostics` | Extend doctor to diagnose every failure scenario introduced above — user can self-verify their installation | all four above | Not started |
+| `json-token-savings` | Cut the tokens the plugin itself costs and the bytes a JSON payload costs, without losing data or degrading what the model reads: structured elide (point 1), schema cost (point 2), inbound columnar (point 3) | `hook-resilience` | **In progress 2026-10-31** — point 1 implemented (structured JSON elide, 96.4% → 98.8% avoided bytes); points 2 and 3 in flight — see SPEC-json-token-savings.md |
 
 ## Build Order
 
@@ -30,6 +31,9 @@ Out of scope: new product features, adoption/marketing, large rewrites.
 
 Rationale: `hook-resilience` establishes the fail-safe pattern the others consume; `v2-compat` requires hooks that already fail safely; `diagnostics` verifies everything else, so it lands last.
 
+`json-token-savings` runs alongside that sequence and does not gate it. It consumes `hook-resilience` — its write-back into the v2 `execute.after` hook goes through the same fail-safe boundary — but nothing in the robustness sequence waits on it.
+
 ## Session Log
 
 - **2026-10-24:** `hook-resilience` implemented. 8 new tests; suite 3085 passed / 26 skipped / 0 failures. `sh-posix-guard` sweep scoped to project runtime scripts (`.agents/` skills excluded — agent-owned assets, not plugin runtime). Released as 3.3.0. Next: `store-resilience` or `executor-resilience`.
+- **2026-10-31:** `json-token-savings` started. Investigation measured where the plugin still spends tokens: tool definitions 5,598 tok per request (2,478 prose + 2,421 schema), routing block 1,035 tok once per session in v2. Whitespace-stripping of API JSON was rejected on measurement (0.0% — APIs already return minified JSON); TSV was rejected as lossy (it collapses number and string). Point 1 implemented: a JSON array tool result is now summarised (shape + samples) instead of sliced, raising avoided bytes from 96.4% to 98.8%. Point 2 was re-scoped after measurement refuted the 609-token prose-dedup estimate (real figure: 68 tokens) — the lever is schema-level descriptions. Operator constraint recorded: model validation uses GLM or MiniMax only, never Claude, Kimi, or Mistral.

@@ -334,6 +334,7 @@ Two shapes. That is the whole matrix.
 | PreToolUse hook (route + block) | Yes | No |
 | PostToolUse hook (capture) | Yes | No |
 | Compaction snapshot (rescue bytes) | Yes | No |
+| Transcript elide (cap native tool results) | Yes | No |
 | Session attribution + per-tool usage | Yes | No |
 | SQLite knowledge base, `open_ctx_stats`, Dashboard | Yes | Yes |
 
@@ -344,6 +345,27 @@ via `tool.execute.before`, `tool.execute.after`,
 capture. `experimental.chat.system.transform` stands in for SessionStart.
 
 Every other client gets the MCP server and nothing host-side.
+
+### Transcript Elide
+
+A native tool result — a `bash` output, a `view`, a `grep` — lands in the
+transcript whole, and the transcript is replayed on every turn of the session.
+Those bytes are therefore paid for again and again, forever, for a result the
+model read once and moved on from.
+
+The plugin caps them: past a threshold, the result is replaced by a
+description of itself plus a pointer to the indexed original. For a JSON
+array, the description is a shape — the column names with their types, the
+row count, how many distinct row shapes there are, and two real sample rows
+— rather than a head-and-tail cut, which would show the first rows and the
+last rows and leave the model unable to tell five hundred records from two.
+
+Nothing is lost. The original bytes go to the knowledge base before the
+transcript is rewritten, and the marker names the source the model can pull
+them back from. A result the model is still working with is never rewritten.
+
+See [Context-compaction environment variables](#context-compaction-environment-variables)
+for the thresholds and the switches.
 
 ### Routing Enforcement
 
@@ -586,6 +608,33 @@ Only the exact value `1` enables it. **Read the trade-off before setting it:** w
 |---|---|---|
 | `OPEN_CONTEXT_MODE_CODE_ECHO_MAX` | `2000` | Character budget for the fenced source block from `open_ctx_execute` / `open_ctx_execute_file`. `0` suppresses it. Only a run of digits is accepted; empty, whitespace-only, negative and non-numeric values keep the default. The full code always reaches the sandbox; only the echo is clipped. |
 | `OPEN_CONTEXT_MODE_COMMAND_ECHO_MAX` | `500` | Character budget for the `$ <command>` line in each `open_ctx_batch_execute` section and each `## Commands` entry. `0` suppresses both. Same parsing rules as above. Note the `$ <command>` line is part of the indexed section text, so `0` also drops it from the FTS5 index and later `open_ctx_search` hits will not show what ran. |
+
+### Context-compaction environment variables
+
+Two passes shrink what the model reads. Both are lossless in the sense that matters:
+the original bytes stay retrievable through the knowledge base, and the model
+never receives a payload it cannot recover.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPEN_CONTEXT_MODE_ELIDE` | `1` (enabled) | Set to `0` to stop capping oversized native tool results in the transcript. A native tool result above `OPEN_CONTEXT_MODE_ELIDE_MIN_BYTES` is replaced by a description of itself plus a pointer to the indexed original; the transcript is replayed on every turn of the session, so those bytes are paid for again and again for a result the model read once. |
+| `OPEN_CONTEXT_MODE_ELIDE_MIN_BYTES` | `4096` | Byte threshold at which a native tool result becomes a candidate for capping. Below it the bookkeeping costs more than the replay saves. |
+| `OPEN_CONTEXT_MODE_ELIDE_CAP_BYTES` | `2048` | Byte budget for what stays in the transcript. A JSON array is summarised within this budget (shape, row count, distinct shapes, two sample rows); anything else keeps a head-and-tail slice. A summary that does not fit the budget is refused rather than cut, so a truncated summary never degrades into a blind slice. |
+| `OPEN_CONTEXT_MODE_ELIDE_KEEP_RECENT` | `8` | How many recent messages keep their tool results verbatim. A result the model is still working with is never rewritten. |
+| `OPEN_CONTEXT_MODE_COLUMNAR` | `0` (disabled) | Set to exactly `1` to compact a JSON tool result into a typed columnar form before the model sees it. **Off by default**: this changes the format the model reads, so it stays disabled until a model has been measured reading it as accurately as the original. The original bytes are always indexed first and the compacted payload carries the pointer. |
+| `OPEN_CONTEXT_MODE_COLUMNAR_MIN_BYTES` | `8192` | Byte threshold for the columnar pass. Below it the rewrite costs more than it saves — the model would have to re-learn the format for a payload that was never going to hurt. |
+
+To check whether the columnar form is safe for your model before enabling it, run the
+readability benchmark against a GLM or MiniMax endpoint:
+
+```bash
+OPEN_CONTEXT_MODE_COLUMNAR_BENCH_API_KEY=<your key> \
+  npx vpx tests/columnar-readability-benchmark.ts --live
+```
+
+It asks the same questions of both renderings and exits non-zero when the
+compacted one scores worse. The benchmark refuses to run against Claude, Kimi or
+Mistral.
 
 ## Contributing
 
