@@ -48,6 +48,7 @@ import { PLATFORM_ENV_VARS } from "../detect.js";
 import { zod3ShapeToV4 } from "./zod3tov4.js";
 import { slimToolSchema } from "../../util/schema-token-savings.js";
 import { elideConfig, elideToolResults } from "./history-elide.js";
+import { columnarConfig, columnarLabel, compactToolResultWithIndex } from "./json-columnar.js";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -1310,6 +1311,66 @@ async function elideTranscript(
   }
 }
 
+/**
+ * SPEC json-token-savings (Point 3) — inbound columnar compaction.
+ *
+ * OpenCode 2.x assembles the tool result, fires `execute.after`, and only
+ * THEN reads `afterEvent.result.content` to build what the model receives
+ * (`packages/core/src/tool.ts`). The TS type marks `result` readonly; the
+ * runtime object is not. So rewriting the payload inside this hook is what
+ * actually changes the model's view of it — the capability the v2 handler
+ * never used.
+ *
+ * Two-phase, like the history-elide pass: plan first (pure), index the
+ * ORIGINAL bytes second, rewrite only if the index returned true. A pointer
+ * is never written for bytes that are not in the content store.
+ */
+async function compactInboundColumnar(
+  event: { tool?: string; id?: string; sessionID?: string },
+  result: unknown,
+  state: ContextModeState,
+): Promise<string | null> {
+  const cfg = columnarConfig();
+  if (!cfg.enabled) return null;
+
+  const tool = typeof event?.tool === "string" ? event.tool : "";
+  if (!tool || tool.startsWith("open_ctx_")) return null;
+
+  const id = typeof event?.id === "string" ? event.id : "";
+  const sessionId = typeof event?.sessionID === "string" ? event.sessionID : "";
+  if (!id || !sessionId) return null;
+
+  const rewrite = await compactToolResultWithIndex(result, { label: columnarLabel(tool, id), minBytes: cfg.minBytes }, (text, label) =>
+    state.indexForElision(text, label, sessionId),
+  );
+  if (!rewrite) return null;
+
+  const target = result as { output?: unknown; content?: unknown } | undefined;
+  if (rewrite.content && Array.isArray(target?.content)) {
+    const part = target.content[0] as { text?: unknown } | undefined;
+    if (part && typeof part === "object") part.text = rewrite.replacement;
+  }
+  if (rewrite.output && typeof target?.output === "string") {
+    target.output = rewrite.replacement;
+  }
+  return rewrite.replacement;
+}
+
+/**
+ * The text a v2 tool result hands to the model, in the host's own order.
+ */
+function extractResultText(result: any): string {
+  if (typeof result?.output === "string") return result.output;
+  if (Array.isArray(result?.content)) {
+    return result.content
+      .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+      .map((c: any) => c.text)
+      .join("\n");
+  }
+  if (typeof result?.content === "string") return result.content;
+  return "";
+}
+
 // ── v2 entrypoint (OpenCode 2.x) ─────────────────────────
 
 /**
@@ -1362,17 +1423,21 @@ async function setupContextModeV2(ctx: V2Context) {
   // v2 moved the result onto the event: `result.output` or `result.content`.
   await ctx.tool.hook("execute.after", async (event) => {
     const result = event.status === "completed" ? (event as { result?: any }).result : undefined;
-    const output =
-      typeof result?.output === "string"
-        ? result.output
-        : Array.isArray(result?.content)
-          ? result.content
-              .filter((c: any) => c?.type === "text" && typeof c.text === "string")
-              .map((c: any) => c.text)
-              .join("\n")
-          : typeof result?.content === "string"
-            ? result.content
-            : "";
+    // Inbound columnar compaction (SPEC json-token-savings, Point 3). The host
+    // reads `afterEvent.result.content` AFTER this hook returns, so rewriting
+    // the payload here is what changes what the model receives.
+    //
+    // `failSafe` is a WRAPPER: it takes a function and returns a guarded one.
+    // Calling it as if it were a value would run the callback unprotected and
+    // the breaker would never engage.
+    //
+    // The guard degrades to `undefined` when its breaker trips, so the
+    // fallback has to cover both "no compaction happened" and "the compaction
+    // pass itself failed". Either way the untouched result is what the model
+    // gets.
+    const guardedColumnar = failSafe("tool.execute.after.columnar", safeLog, () => compactInboundColumnar(event, result, state));
+    const compacted: string | null | undefined = await guardedColumnar();
+    const output: string = compacted ?? extractResultText(result);
     await h.after(
       {
         tool: event.tool,
