@@ -46,6 +46,7 @@ import type { SessionEvent } from "../../types.js";
 import { AdapterPlatformType, OpenCodeAdapter } from "./index.js";
 import { PLATFORM_ENV_VARS } from "../detect.js";
 import { zod3ShapeToV4 } from "./zod3tov4.js";
+import { slimToolSchema } from "../../util/schema-token-savings.js";
 import { elideConfig, elideToolResults } from "./history-elide.js";
 
 // ── Types ─────────────────────────────────────────────────
@@ -717,7 +718,7 @@ async function initState(projectDir: string, safeLog: LogSink, deps: InitStateDe
         title: String(config.title ?? registered.name),
         description: String(config.description ?? ""),
         zodShape,
-        jsonSchema: zodShapeToJsonSchema(zodShape),
+        jsonSchema: zodShapeToJsonSchema(zodShape, String(config.description ?? "")),
         async run(args, sessionId) {
           const project = projectDir;
 
@@ -1071,15 +1072,17 @@ async function initState(projectDir: string, safeLog: LogSink, deps: InitStateDe
  * degrades a type Zod cannot express (z.preprocess, custom transforms) to `{}`
  * instead of throwing — the tool still works, it just documents less.
  */
-function zodShapeToJsonSchema(shape: Record<string, unknown>): Record<string, unknown> {
+export function zodShapeToJsonSchema(shape: Record<string, unknown>, prose = ""): Record<string, unknown> {
   try {
     const asJson = z.toJSONSchema(z.object(shape as Record<string, z.ZodType>), {
       io: "input",
       unrepresentable: "any",
     }) as Record<string, unknown>;
-    // $schema is meaningless to the host and only inflates every tool entry.
-    delete asJson.$schema;
-    return asJson;
+    // $schema is meaningless to the host and only inflates every tool
+    // entry; a parameter description the tool's own prose already covers
+    // teaches the model nothing new. slimToolSchema drops both, so the
+    // v2 native path serves the same bytes as the MCP path.
+    return slimToolSchema(asJson, prose);
   } catch {
     return { type: "object", properties: {}, additionalProperties: true };
   }

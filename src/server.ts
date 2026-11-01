@@ -80,6 +80,7 @@ import { OpenCodeAdapter, opencodeConfigDir } from "./platforms/opencode/index.j
 import { isContextModeToolEnabled, readContextModeToolsAllowlist } from "./util/tools-allowlist.js";
 import { stripJsonComments } from "./util/jsonc.js";
 import { resolveProjectDir } from "./util/project-dir.js";
+import { slimToolSchema } from "./util/schema-token-savings.js";
 import { loadDatabase } from "./db-base.js";
 import {
   AnalyticsEngine,
@@ -396,12 +397,20 @@ export function installStrictClientSchemaCompat(target: McpServer = server): voi
     const original = low._requestHandlers?.get("tools/list");
     if (typeof original !== "function") return;
     target.server.setRequestHandler(ListToolsRequestSchema, async (req, extra) => {
-      const result = (await original(req as unknown, extra as unknown)) as { tools?: Array<{ inputSchema?: unknown }> } | undefined;
+      const result = (await original(req as unknown, extra as unknown)) as
+        | {
+            tools?: Array<{ description?: string; inputSchema?: unknown }>;
+          }
+        | undefined;
       if (result && Array.isArray(result.tools)) {
         for (const tool of result.tools) {
           if (!tool || tool.inputSchema == null) continue;
           try {
-            tool.inputSchema = sanitizeSchemaForStrictClients(tool.inputSchema);
+            // slimToolSchema drops the JSON-Schema dialect URI and every
+            // parameter description the tool's own prose already covers
+            // (SPEC Point 2). The prose is left untouched — only the
+            // schema shrinks.
+            tool.inputSchema = sanitizeSchemaForStrictClients(slimToolSchema(tool.inputSchema, tool.description ?? ""));
           } catch {
             /* leave this tool's schema unchanged */
           }
