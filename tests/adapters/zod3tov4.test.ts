@@ -1,6 +1,7 @@
 import "../setup-home";
 import { describe, it, expect } from "vite-plus/test";
-import { z } from "zod";
+import { z } from "zod/v3";
+import z4 from "zod/v4";
 import { zod3ShapeToV4 } from "../../src/platforms/opencode/zod3tov4.js";
 
 describe("zod3ShapeToV4", () => {
@@ -124,6 +125,27 @@ describe("zod3ShapeToV4", () => {
     const result = zod3ShapeToV4(z3Shape as Record<string, unknown>);
     expect((result.foo as any)._zod).toBeDefined();
     expect((result.bar as any)._zod).toBeDefined();
+  });
+
+  // The plugin builds its own tool schemas with whatever `zod` resolves
+  // to at runtime. From zod 4.x on, root IS v4, so the converter receives
+  // v4 schemas. Before the passthrough guard existed, the `_def` check
+  // collapsed every one of them to z.unknown() — stripping all validation
+  // from every tool's args at once. This pins the fix: a v4 schema comes
+  // through as the SAME instance, constraints intact.
+  it("passes a Zod 4 schema through unchanged", () => {
+    const v4Shape = {
+      name: z4.string().min(2).describe("User name"),
+      age: z4.number().int(),
+    };
+    const result = zod3ShapeToV4(v4Shape as unknown as Record<string, unknown>);
+
+    expect(result.name).toBe(v4Shape.name);
+    expect(result.age).toBe(v4Shape.age);
+
+    // Constraints survive — not a rebuilt z.unknown().
+    expect(() => (result.name as typeof v4Shape.name).parse("x")).toThrow();
+    expect((result.name as typeof v4Shape.name).parse("ok")).toBe("ok");
   });
 
   it("returns z.unknown() for objects without _def", () => {

@@ -24,6 +24,15 @@ function zod3ToV4(v: unknown, depth = 0): z.ZodType {
   if (v == null || typeof v !== "object") return z.unknown();
 
   const obj = v as Record<string, unknown>;
+
+  // A Zod 4 schema already carries what a v4 host needs — pass it through
+  // untouched. Without this guard the `_def` check below would collapse
+  // every v4 schema to z.unknown(), silently stripping all validation
+  // from the tool's args whenever the plugin itself builds its schemas
+  // with Zod 4 (which is what `zod` resolves to from zod 4.x on, where
+  // the root export IS v4 and the bridge line is `zod/v3`).
+  if (obj._zod && typeof obj._zod === "object") return v as z.ZodType;
+
   if (!obj._def || typeof obj._def !== "object") return z.unknown();
 
   const def = obj._def as Record<string, unknown>;

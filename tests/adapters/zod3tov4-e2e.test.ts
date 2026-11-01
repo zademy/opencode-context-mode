@@ -11,7 +11,7 @@
  * z.preprocess() survive the Zod v3→v4 conversion.
  */
 import { describe, it, expect } from "vite-plus/test";
-import { z } from "zod";
+import { z } from "zod/v3";
 import z4 from "zod/v4";
 import { zod3ShapeToV4 } from "../../src/platforms/opencode/zod3tov4.js";
 
