@@ -270,6 +270,20 @@ export function healBetterSqlite3Binding(pkgRoot) {
     const bindingPath = resolve(bsqRoot, "build", "Release", "better_sqlite3.node");
     const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
 
+    // ── better-sqlite3 v13: the binding ships in the package ────────
+    // v13 has no install script at all — it publishes the prebuilt
+    // binding as prebuilds/<platform>-<arch>.node inside the tarball and
+    // loads it directly, so there is nothing to heal and nothing to
+    // compile. Checking this first keeps the healer from "repairing" an
+    // install that was never broken: under v13 the v12 layout above
+    // (build/Release/better_sqlite3.node) never exists, so without this
+    // check every install would fall through to prebuild-install and
+    // report a binding failure that did not happen.
+    const v13Prebuild = resolve(bsqRoot, "prebuilds", `${process.platform}-${process.arch}.node`);
+    if (fsExistsSync(v13Prebuild)) {
+      return { healed: true, reason: "binding-present" };
+    }
+
     // ── Conda defense (#533) ─────────────────────────────────────────
     // Resolve once up front; reuse across all child spawns. The probe
     // is cheap (one stat call on darwin, a PATH walk on linux).

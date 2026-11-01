@@ -1,5 +1,9 @@
+# better-sqlite3 v13 ships its prebuilt binding inside the package
+# (prebuilds/<platform>-<arch>.node) and has NO install script, so there is
+# nothing to build. Allowing it here made pnpm synthesize `node-gyp rebuild`
+# from the shipped binding.gyp, which fails on machines without a C++
+# toolchain (the Windows CI runner) — for a binding that was already there.
 onlyBuiltDependencies:
-  - better-sqlite3
   - esbuild
 catalog:
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
