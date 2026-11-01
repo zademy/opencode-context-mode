@@ -237,6 +237,79 @@ describe("applyElision", () => {
     expect(result.value[0].text).toContain('source "cm-elide/bash/c1"');
     expect(() => result.value.map((p: unknown) => p)).not.toThrow();
   });
+
+  // ── JSON arrays are summarised, not sliced ──────────────────────
+  //
+  // The head/tail cut of a JSON array shows the first rows and the last
+  // rows and nothing between, so the model cannot tell "there are five
+  // hundred of these" from "there are two". The digest states the shape
+  // and the row count, and it is smaller than the slice it replaces.
+
+  it("summarises a JSON array instead of slicing it", () => {
+    const rows = Array.from({ length: 500 }, (_, i) => JSON.stringify({ id: i, title: "issue " + i, body: "x".repeat(200) }));
+    const c = candidate(`[${rows.join(",")}]`);
+    applyElision(c, { ...CFG, capBytes: 2048 });
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain("500 rows");
+    expect(out).toContain("id:number");
+    expect(out).toContain("title:string");
+  });
+
+  it("keeps the JSON digest smaller than the head/tail slice it replaces", () => {
+    const rows = Array.from({ length: 200 }, (_, i) => JSON.stringify({ id: i, title: "issue " + i, body: "x".repeat(200) }));
+    const json = candidate(`[${rows.join(",")}]`);
+    const jsonBytes = applyElision(json, { ...CFG, capBytes: 2048 });
+
+    const text = Array.from({ length: 200 }, (_, i) => "log line " + i + " " + "x".repeat(200)).join("\n");
+    const slice = candidate(text);
+    const sliceBytes = applyElision(slice, { ...CFG, capBytes: 2048 });
+
+    expect(jsonBytes).toBeGreaterThan(sliceBytes);
+  });
+
+  it("still points at the indexed original after summarising", () => {
+    const rows = Array.from({ length: 50 }, (_, i) => JSON.stringify({ id: i, v: "y".repeat(100) }));
+    const c = candidate(`[${rows.join(",")}]`);
+    applyElision(c, { ...CFG, capBytes: 2048 });
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain('source "cm-elide/bash/c1"');
+    expect(out).toContain("open_ctx_search");
+    expect(out).toContain("JSON shape and samples");
+  });
+
+  // A digest that does not fit the budget is refused rather than cut. A cut
+  // digest is a slice with extra steps — and a slice that drops the shape
+  // line is exactly the blind cut this replaces.
+  it("falls back to the slice when the digest does not fit the budget", () => {
+    const rows = Array.from({ length: 50 }, (_, i) => JSON.stringify({ id: i, v: "y".repeat(100) }));
+    const c = candidate(`[${rows.join(",")}]`);
+    applyElision(c, { ...CFG, capBytes: 100 });
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain("head and tail");
+    expect(out).not.toContain("JSON shape and samples");
+  });
+
+  it("leaves a non-JSON payload on the head/tail path", () => {
+    const c = candidate("build failed\n" + "z".repeat(5000));
+    applyElision(c, CFG);
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain("head and tail");
+    expect(out).not.toContain("JSON shape");
+  });
+
+  it("leaves a JSON object on the head/tail path", () => {
+    const c = candidate(JSON.stringify({ a: 1, b: "z".repeat(5000) }));
+    applyElision(c, CFG);
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain("head and tail");
+  });
+
+  it("never rewrites a payload that is not valid JSON", () => {
+    const c = candidate('[{"a":1},');
+    applyElision(c, CFG);
+    const out = (c.part.result as any).value as string;
+    expect(out).toContain("head and tail");
+  });
 });
 
 describe("elideToolResults", () => {

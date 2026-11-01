@@ -29,6 +29,7 @@
  */
 
 import { charSafePrefix, charSafeSlice } from "../../truncate.js";
+import { jsonSummary } from "./json-summary.js";
 
 // ── Config ────────────────────────────────────────────────
 
@@ -201,11 +202,11 @@ export function findElidableToolResults(messages: unknown, cfg: ElideConfig): El
 
 // ── Phase 2: apply ────────────────────────────────────────
 
-function marker(label: string, elidedBytes: number, shownBytes: number): string {
+function marker(label: string, elidedBytes: number, shownBytes: number, kept: string): string {
   return (
     `[open-context-mode] ${formatBytes(elidedBytes)} of this tool result was elided from the transcript and indexed as source "${label}". ` +
     `Retrieve it with open_ctx_search(queries: ["<what you need>"], source: "${label}"). ` +
-    `${formatBytes(shownBytes)} kept (head and tail).`
+    `${formatBytes(shownBytes)} kept (${kept}).`
   );
 }
 
@@ -226,6 +227,22 @@ function formatBytes(n: number): string {
  */
 export function applyElision(candidate: ElisionCandidate, cfg: ElideConfig): number {
   const originalBytes = Buffer.byteLength(candidate.text, "utf8");
+
+  // A JSON array is summarised, not sliced. The head/tail cut of an array
+  // shows the first rows and the last rows and nothing between, so the
+  // model cannot tell "there are five hundred of these" from "there are
+  // two" — and the budget is spent on repeated key names. The digest is
+  // both smaller and more informative. It is refused rather than cut when
+  // it does not fit, so a truncated digest never becomes a slice again.
+  const digest = jsonSummary(candidate.text, cfg.capBytes);
+  if (digest !== null) {
+    const digestBytes = Buffer.byteLength(digest, "utf8");
+    const note = marker(candidate.label, originalBytes - digestBytes, digestBytes, "JSON shape and samples");
+    const replacement = `${digest}\n\n${note}`;
+    writeReplacement(candidate.part, replacement);
+    return Math.max(0, originalBytes - Buffer.byteLength(replacement, "utf8"));
+  }
+
   // 60/40 head/tail: build and test output puts the summary — where the actual
   // failure is — at the end, so a head-only cut keeps the part nobody wants.
   const headBytes = Math.max(0, Math.floor(cfg.capBytes * 0.6));
@@ -235,19 +252,31 @@ export function applyElision(candidate: ElisionCandidate, cfg: ElideConfig): num
   const tail = tailBytes > 0 ? charSafeSlice(candidate.text, candidate.text.length - tailBytes) : "";
   const keptText = tail ? `${head}\n…[${originalBytes} bytes elided]…\n${tail}` : head;
 
-  const note = marker(candidate.label, originalBytes - Buffer.byteLength(keptText, "utf8"), Buffer.byteLength(keptText, "utf8"));
+  const note = marker(
+    candidate.label,
+    originalBytes - Buffer.byteLength(keptText, "utf8"),
+    Buffer.byteLength(keptText, "utf8"),
+    "head and tail",
+  );
   const replacement = `${keptText}\n\n${note}`;
 
-  const result = candidate.part.result as ToolResultValueShape | undefined;
-  if (result) {
-    // A `content` result is an array the host maps over on every later turn.
-    // Writing a bare string there breaks the session for good ("value.map is
-    // not a function"), so keep the array shape and swap in one text entry.
-    if (result.type === "content") result.value = [{ type: "text", text: replacement }];
-    else result.value = replacement;
-  }
+  writeReplacement(candidate.part, replacement);
 
   return Math.max(0, originalBytes - Buffer.byteLength(replacement, "utf8"));
+}
+
+/**
+ * Write the replacement text back into the part, preserving its shape.
+ *
+ * A `content` result is an array the host maps over on every later turn.
+ * Writing a bare string there breaks the session for good ("value.map is
+ * not a function"), so keep the array shape and swap in one text entry.
+ */
+function writeReplacement(part: ElisionCandidate["part"], replacement: string): void {
+  const result = part.result as ToolResultValueShape | undefined;
+  if (!result) return;
+  if (result.type === "content") result.value = [{ type: "text", text: replacement }];
+  else result.value = replacement;
 }
 
 // ── Convenience (test surface) ────────────────────────────
