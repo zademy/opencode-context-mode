@@ -31,10 +31,15 @@ describe("package.json dependency policy (#514)", () => {
     expect(pkg.optionalDependencies?.["better-sqlite3"]).toBeUndefined();
   });
 
-  it("better-sqlite3 version pin is preserved at ^12.6.2", () => {
+  it("better-sqlite3 version pin is preserved at ^13.0.3", () => {
     const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf-8"));
     // Demoting the package back to dependencies must NOT bump or drop the
     // pin — the pin is a separate decision tracked in commit history.
-    expect(pkg.dependencies?.["better-sqlite3"]).toBe("^12.6.2");
+    //
+    // The pin moved from ^12.6.2 to ^13.0.3 as its own decision: v13
+    // declares `engines.node: ">=22"` where v12 pinned a finite list of
+    // majors, so the open-ended range keeps a future Node release from
+    // silently failing to install the native binding again (#514).
+    expect(pkg.dependencies?.["better-sqlite3"]).toBe("^13.0.3");
   });
 });
