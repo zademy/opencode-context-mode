@@ -70,7 +70,7 @@
   "dependencies": {
     "@clack/prompts": "^1.8.1",
     "@mixmark-io/domino": "^2.2.0",
-    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "better-sqlite3": "^13.0.3",
     "picocolors": "^1.1.1",
     "turndown": "^7.2.4",
